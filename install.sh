@@ -35,6 +35,20 @@ log_config() {
     echo -e "${CYAN}[CONFIG]${NC} $1"
 }
 
+write_komari_token_file() {
+    local token_file="$1"
+
+    if [ -z "$komari_token" ]; then
+        return 0
+    fi
+
+    if ! (umask 077 && printf '%s\n' "$komari_token" > "$token_file"); then
+        return 1
+    fi
+
+    chmod 600 "$token_file"
+}
+
 redact_komari_args() {
     local raw_args="$1"
     local redacted_args=""
@@ -103,6 +117,7 @@ case $os_type in
 esac
 
 # Parse install-specific arguments
+komari_token=""
 komari_args=""
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -122,6 +137,22 @@ while [[ $# -gt 0 ]]; do
             install_version="$2"
             shift 2
             ;;
+        --token|-t)
+            if [ $# -lt 2 ]; then
+                log_error "Missing value for $1"
+                exit 1
+            fi
+            komari_token="$2"
+            shift 2
+            ;;
+        --token=*)
+            komari_token="${1#*=}"
+            shift
+            ;;
+        -t=*)
+            komari_token="${1#*=}"
+            shift
+            ;;
         --install*)
             log_warning "Unknown install parameter: $1"
             shift
@@ -136,9 +167,15 @@ done
 
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
-komari_args_log="$(redact_komari_args "$komari_args")"
 
 komari_agent_path="${target_dir}/agent"
+komari_token_file="${target_dir}/komari-agent.token"
+komari_service_args="$komari_args"
+if [ -n "$komari_token" ]; then
+    komari_service_args="$komari_service_args --token-file $komari_token_file"
+fi
+komari_service_args="${komari_service_args# }"
+komari_service_args_log="$(redact_komari_args "$komari_service_args")"
 
 # macOS doesn't always require sudo for everything
 if [ "$os_name" = "darwin" ] && command -v brew >/dev/null 2>&1; then
@@ -161,7 +198,10 @@ log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
-log_config "  Binary arguments: ${GREEN}$komari_args_log${NC}"
+log_config "  Binary arguments: ${GREEN}$komari_service_args_log${NC}"
+if [ -n "$komari_token" ]; then
+    log_config "  Token file: ${GREEN}$komari_token_file${NC}"
+fi
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
 else
@@ -216,6 +256,11 @@ uninstall_previous() {
     if [ -f "$komari_agent_path" ]; then
         log_info "Removing old binary..."
         rm -f "$komari_agent_path"
+    fi
+
+    if [ -f "$komari_token_file" ]; then
+        log_info "Removing old token file..."
+        rm -f "$komari_token_file"
     fi
 }
 
@@ -356,6 +401,15 @@ fi
 chmod +x "$komari_agent_path"
 log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
+if [ -n "$komari_token" ]; then
+    log_step "Writing service token file..."
+    if ! write_komari_token_file "$komari_token_file"; then
+        log_error "Failed to write token file: $komari_token_file"
+        exit 1
+    fi
+    log_success "Service token stored at ${GREEN}$komari_token_file${NC}"
+fi
+
 # Detect init system and configure service
 log_step "Configuring system service..."
 
@@ -462,7 +516,7 @@ if [ "$init_system" = "nixos" ]; then
     echo -e "${CYAN}  wantedBy = [ \"multi-user.target\" ];${NC}"
     echo -e "${CYAN}  serviceConfig = {${NC}"
     echo -e "${CYAN}    Type = \"simple\";${NC}"
-    echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${komari_args_log}\";${NC}"
+    echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${komari_service_args_log}\";${NC}"
     echo -e "${CYAN}    WorkingDirectory = \"${target_dir}\";${NC}"
     echo -e "${CYAN}    Restart = \"always\";${NC}"
     echo -e "${CYAN}    User = \"root\";${NC}"
@@ -481,7 +535,7 @@ elif [ "$init_system" = "openrc" ]; then
 name="Komari Agent Service"
 description="Komari monitoring agent"
 command="${komari_agent_path}"
-command_args="${komari_args}"
+command_args="${komari_service_args}"
 command_user="root"
 directory="${target_dir}"
 pidfile="/run/${service_name}.pid"
@@ -510,7 +564,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${komari_agent_path} ${komari_args}
+ExecStart=${komari_agent_path} ${komari_service_args}
 WorkingDirectory=${target_dir}
 Restart=always
 User=root
@@ -537,7 +591,7 @@ STOP=10
 USE_PROCD=1
 
 PROG="${komari_agent_path}"
-ARGS="${komari_args}"
+ARGS="${komari_service_args}"
 
 start_service() {
     procd_open_instance
@@ -600,8 +654,8 @@ elif [ "$init_system" = "launchd" ]; then
 EOF
     
     # Add program arguments if provided
-    if [ -n "$komari_args" ]; then
-        echo "$komari_args" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
+    if [ -n "$komari_service_args" ]; then
+        echo "$komari_service_args" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
     fi
     
     cat >> "$plist_file" << EOF
@@ -664,7 +718,7 @@ end script
 
 # Start
 script
-    exec ${komari_agent_path} ${komari_args}
+    exec ${komari_agent_path} ${komari_service_args}
 end script
 EOF
     # enable Upstart unit
@@ -687,5 +741,5 @@ else
     log_success "Komari-agent installation completed!"
 fi
 log_config "Service: ${GREEN}$service_name${NC}"
-log_config "Arguments: ${GREEN}$komari_args_log${NC}"
+log_config "Arguments: ${GREEN}$komari_service_args_log${NC}"
 echo -e "${WHITE}===========================================${NC}"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -40,6 +41,9 @@ var RootCmd = &cobra.Command{
 			if err != nil {
 				log.Fatalf("Failed to parse config file: %v", err)
 			}
+		}
+		if err := loadTokenFromFile(); err != nil {
+			log.Fatalf("Failed to load token file: %v", err)
 		}
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -150,6 +154,7 @@ func Execute() {
 
 func init() {
 	RootCmd.PersistentFlags().StringVarP(&flags.Token, "token", "t", "", "API token")
+	RootCmd.PersistentFlags().StringVar(&flags.TokenFile, "token-file", "", "Path to a file containing the API token")
 	//RootCmd.MarkPersistentFlagRequired("token")
 	RootCmd.PersistentFlags().StringVarP(&flags.Endpoint, "endpoint", "e", "", "API endpoint")
 	//RootCmd.MarkPersistentFlagRequired("endpoint")
@@ -178,6 +183,25 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")
 	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
+}
+
+func loadTokenFromFile() error {
+	if flags.Token != "" || flags.TokenFile == "" {
+		return nil
+	}
+
+	tokenBytes, err := os.ReadFile(flags.TokenFile)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", flags.TokenFile, err)
+	}
+
+	token := strings.TrimSpace(string(tokenBytes))
+	if token == "" {
+		return fmt.Errorf("token file %s is empty", flags.TokenFile)
+	}
+
+	flags.Token = token
+	return nil
 }
 
 func loadFromEnv() {

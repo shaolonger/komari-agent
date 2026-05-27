@@ -5,6 +5,7 @@ type Config struct {
 	DisableAutoUpdate    bool    `json:"disable_auto_update" env:"AGENT_DISABLE_AUTO_UPDATE"`         // 禁用自动更新
 	DisableWebSsh        bool    `json:"disable_web_ssh" env:"AGENT_DISABLE_WEB_SSH"`                 // 禁用远程控制（web ssh 和 rce）
 	MemoryModeAvailable  bool    `json:"memory_mode_available" env:"AGENT_MEMORY_MODE_AVAILABLE"`     // [deprecated] 已弃用，请使用 MemoryIncludeCache
+	TokenFile            string  `json:"token_file" env:"AGENT_TOKEN_FILE"`                           // Token 文件路径
 	Token                string  `json:"token" env:"AGENT_TOKEN"`                                     // Token
 	Endpoint             string  `json:"endpoint" env:"AGENT_ENDPOINT"`                               // 面板地址
 	Interval             float64 `json:"interval" env:"AGENT_INTERVAL"`                               // 数据采集间隔，单位秒

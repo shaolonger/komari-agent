@@ -48,11 +48,31 @@ function Format-KomariArgsForLog {
     return $displayArgs -join ' '
 }
 
+function Write-KomariTokenFile {
+    param(
+        [string]$Path,
+        [string]$Token
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        return
+    }
+
+    $trimmedToken = $Token.Trim()
+    [System.IO.File]::WriteAllText($Path, "$trimmedToken`n", [System.Text.UTF8Encoding]::new($false))
+
+    $icaclsOutput = & icacls $Path /inheritance:r /grant:r "Administrators:F" /grant:r "SYSTEM:F" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to restrict token file ACLs: $icaclsOutput"
+    }
+}
+
 # Default parameters
 $InstallDir = Join-Path $Env:ProgramFiles "Komari"
 $ServiceName = "komari-agent"
 $GitHubProxy = ""
 $KomariArgs = @()
+$TokenValue = ""
 $InstallVersion = ""
 
 # Parse script arguments
@@ -62,7 +82,35 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
         "--install-ghproxy" { $GitHubProxy = $args[$i + 1]; $i++; continue }
         "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
-        Default { $KomariArgs += $args[$i] }
+        "--token" {
+            if ($i + 1 -ge $args.Count) {
+                Log-Error "Missing value for --token"
+                exit 1
+            }
+            $TokenValue = $args[$i + 1]
+            $i++
+            continue
+        }
+        "-t" {
+            if ($i + 1 -ge $args.Count) {
+                Log-Error "Missing value for -t"
+                exit 1
+            }
+            $TokenValue = $args[$i + 1]
+            $i++
+            continue
+        }
+        Default {
+            if ($args[$i] -like '--token=*') {
+                $TokenValue = $args[$i].Substring('--token='.Length)
+                continue
+            }
+            if ($args[$i] -like '-t=*') {
+                $TokenValue = $args[$i].Substring('-t='.Length)
+                continue
+            }
+            $KomariArgs += $args[$i]
+        }
     }
 }
 
@@ -75,6 +123,10 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 
 # Prepare GitHub proxy display
 if ($GitHubProxy -ne '') { $ProxyDisplay = $GitHubProxy } else { $ProxyDisplay = '(direct)' }
+$TokenFile = Join-Path $InstallDir 'komari-agent.token'
+if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
+    $KomariArgs += "--token-file=`"$TokenFile`""
+}
 $RedactedArgString = Format-KomariArgsForLog -Arguments $KomariArgs
 
 # Detect architecture early for constructing binary name
@@ -202,6 +254,9 @@ Log-Config "Service name: $ServiceName"
 Log-Config "Install directory: $InstallDir"
 Log-Config "GitHub proxy: $ProxyDisplay"
 Log-Config "Agent arguments: $RedactedArgString"
+if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
+    Log-Config "Token file: $TokenFile"
+}
 if ($InstallVersion -ne "") {
     Log-Config "Specified agent version: $InstallVersion"
 } else {
@@ -244,6 +299,11 @@ function Uninstall-Previous {
         Log-Warning "Removing old binary..."
         Remove-Item $AgentPath -Force
     }
+
+    if (Test-Path $TokenFile) {
+        Log-Warning "Removing old token file..."
+        Remove-Item $TokenFile -Force
+    }
 }
 Uninstall-Previous
 
@@ -282,6 +342,18 @@ catch {
     exit 1
 }
 Log-Success "Downloaded and saved to $AgentPath"
+
+if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
+    Log-Step "Writing service token file..."
+    try {
+        Write-KomariTokenFile -Path $TokenFile -Token $TokenValue
+    }
+    catch {
+        Log-Error "Failed to write token file: $_"
+        exit 1
+    }
+    Log-Success "Service token stored at $TokenFile"
+}
 
 # Register and start service
 Log-Step "Configuring Windows service with nssm..."
