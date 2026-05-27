@@ -11,7 +11,9 @@
 
 - 优先使用 `--config` 或 `--token-file` 载入认证材料，不要把 token 放进命令行参数、shell history、systemd/OpenRC/procd/launchd/Windows 服务定义、Docker 启动参数或日志。
 - 仅在安装阶段使用管理员或 root 权限；安装完成后，应以专用服务账户运行 agent，并确保配置目录、`auto-discovery.json`、JSON 配置文件只对 owner 或服务账户可读写。
-- 如果业务不需要远程终端或命令执行，部署时显式加上 `--disable-web-ssh`，把远程控制面收缩到最小。
+- 远程终端和命令执行默认禁用；只有在业务明确需要时，才显式传入 `--enable-remote-control` 开启远程控制面。
+- 如果显式开启远程终端，默认仍会施加每台 agent 最多 1 个终端会话、300 秒空闲超时、1800 秒最大会话时长；如确有需要，再通过 `--max-terminal-sessions`、`--terminal-idle-timeout`、`--terminal-max-duration` 调整。
+- 如果需要保留任务命令审计，使用显式开关 `--audit-task-commands`，并假定日志只用于受控审计面，因为命令文本会经过脱敏后落日志。
 - 如环境不允许自动更新，使用 `--disable-auto-update`，改为人工审批并配合下面的离线校验流程执行升级。
 - 容器部署时仅挂载只读配置文件和必要运行目录，不要把宿主机上不相关的敏感路径暴露给容器。
 
@@ -91,7 +93,7 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 
 1. 立即在服务端吊销或轮换泄漏 token，并确认旧 token 失效。
 2. 回收所有可能包含旧 token 的介质：命令行历史、服务定义、容器编排文件、代理日志、CI 日志、排障截图与临时脚本。
-3. 检查相关节点是否启用了 `--ignore-unsafe-cert` 或未禁用的远程终端能力；如有，优先下线或改为 `--disable-web-ssh` 并恢复证书校验。
+3. 检查相关节点是否启用了 `--ignore-unsafe-cert` 或显式开启了 `--enable-remote-control`；如有，优先下线远控能力并恢复证书校验。
 4. 使用受控 JSON 配置文件或 `--token-file` 重新部署，随后执行一次连接验证和最小权限复核。
 5. 如果泄漏范围不明，追加审计代理/网关访问日志与任务执行日志，确认是否出现异常终端、任务下发或更新行为。
 

@@ -3,7 +3,12 @@ package flags_pkg
 type Config struct {
 	AutoDiscoveryKey     string  `json:"auto_discovery_key" env:"AGENT_AUTO_DISCOVERY_KEY"`           // 自动发现密钥
 	DisableAutoUpdate    bool    `json:"disable_auto_update" env:"AGENT_DISABLE_AUTO_UPDATE"`         // 禁用自动更新
-	DisableWebSsh        bool    `json:"disable_web_ssh" env:"AGENT_DISABLE_WEB_SSH"`                 // 禁用远程控制（web ssh 和 rce）
+	DisableWebSsh        bool    `json:"disable_web_ssh" env:"AGENT_DISABLE_WEB_SSH"`                 // 兼容旧配置的远程控制禁用开关；默认禁用远程控制
+	EnableRemoteControl  bool    `json:"enable_remote_control" env:"AGENT_ENABLE_REMOTE_CONTROL"`     // 显式启用远程控制（web ssh 和 rce）
+	AuditTaskCommands    bool    `json:"audit_task_commands" env:"AGENT_AUDIT_TASK_COMMANDS"`         // 显式开启任务命令审计日志
+	MaxTerminalSessions  int     `json:"max_terminal_sessions" env:"AGENT_MAX_TERMINAL_SESSIONS"`     // 单机允许的最大终端会话数
+	TerminalIdleTimeout  int     `json:"terminal_idle_timeout" env:"AGENT_TERMINAL_IDLE_TIMEOUT"`     // 终端空闲超时，单位秒
+	TerminalMaxDuration  int     `json:"terminal_max_duration" env:"AGENT_TERMINAL_MAX_DURATION"`     // 终端最大会话时长，单位秒
 	MemoryModeAvailable  bool    `json:"memory_mode_available" env:"AGENT_MEMORY_MODE_AVAILABLE"`     // [deprecated] 已弃用，请使用 MemoryIncludeCache
 	TokenFile            string  `json:"token_file" env:"AGENT_TOKEN_FILE"`                           // Token 文件路径
 	Token                string  `json:"token" env:"AGENT_TOKEN"`                                     // Token
@@ -32,4 +37,10 @@ type Config struct {
 
 }
 
-var GlobalConfig = &Config{}
+func (config *Config) RemoteControlEnabled() bool {
+	return config.EnableRemoteControl || !config.DisableWebSsh
+}
+
+var GlobalConfig = &Config{
+	DisableWebSsh: true,
+}

@@ -20,11 +20,7 @@ type capturedTaskResult struct {
 func TestNewTaskReturnsCommandOutput(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 2*time.Second)
-
-	flags.DisableWebSsh = false
-	t.Cleanup(func() {
-		flags.DisableWebSsh = false
-	})
+	setRemoteControlEnabled(t, true)
 
 	NewTask("task-output", successTaskCommand())
 
@@ -45,11 +41,7 @@ func TestNewTaskReturnsCommandOutput(t *testing.T) {
 func TestNewTaskTimesOutLongRunningCommand(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 150*time.Millisecond)
-
-	flags.DisableWebSsh = false
-	t.Cleanup(func() {
-		flags.DisableWebSsh = false
-	})
+	setRemoteControlEnabled(t, true)
 
 	startedAt := time.Now()
 	NewTask("task-timeout", slowTaskCommand())
@@ -76,11 +68,7 @@ func TestNewTaskTruncatesLargeOutput(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 2*time.Second)
 	setTaskOutputLimit(t, 32)
-
-	flags.DisableWebSsh = false
-	t.Cleanup(func() {
-		flags.DisableWebSsh = false
-	})
+	setRemoteControlEnabled(t, true)
 
 	NewTask("task-large-output", largeOutputTaskCommand(64))
 
@@ -104,11 +92,7 @@ func TestNewTaskTruncatesLargeOutput(t *testing.T) {
 func TestNewTaskLogsDoNotExposeCommandText(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 2*time.Second)
-
-	flags.DisableWebSsh = false
-	t.Cleanup(func() {
-		flags.DisableWebSsh = false
-	})
+	setRemoteControlEnabled(t, true)
 
 	logBuffer, restoreLogger := captureTaskLogs(t)
 	defer restoreLogger()
@@ -134,15 +118,44 @@ func TestNewTaskLogsDoNotExposeCommandText(t *testing.T) {
 	}
 }
 
+func TestNewTaskAuditLoggingRedactsSensitiveCommandText(t *testing.T) {
+	result := captureTaskResult(t)
+	setTaskExecutionTimeout(t, 2*time.Second)
+	setRemoteControlEnabled(t, true)
+	setTaskCommandAudit(t, true)
+
+	logBuffer, restoreLogger := captureTaskLogs(t)
+	defer restoreLogger()
+
+	command := auditedTaskCommand()
+	NewTask("task-audit", command)
+
+	if result.exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d with result %q", result.exitCode, result.result)
+	}
+	logOutput := logBuffer.String()
+	if strings.Contains(logOutput, "token=secret") || strings.Contains(logOutput, "Bearer abc123") || strings.Contains(logOutput, "--token supersecret") {
+		t.Fatalf("expected audit log to redact sensitive command content, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "Task audit task_id=task-audit") {
+		t.Fatalf("expected audit log entry, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "token=[REDACTED]") {
+		t.Fatalf("expected token query redaction, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "Authorization: Bearer [REDACTED]") {
+		t.Fatalf("expected authorization header redaction, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "--token [REDACTED]") {
+		t.Fatalf("expected CLI token redaction, got %q", logOutput)
+	}
+}
+
 func TestNewTaskQueuesWhenConcurrencyLimitReached(t *testing.T) {
 	results := captureTaskResults(t, 2)
 	setTaskExecutionTimeout(t, 2*time.Second)
 	setTaskConcurrencyLimit(t, 1)
-
-	flags.DisableWebSsh = false
-	t.Cleanup(func() {
-		flags.DisableWebSsh = false
-	})
+	setRemoteControlEnabled(t, true)
 
 	logBuffer, restoreLogger := captureTaskLogs(t)
 	defer restoreLogger()
@@ -199,6 +212,19 @@ func setTaskExecutionTimeout(t *testing.T, timeout time.Duration) {
 	})
 }
 
+func setRemoteControlEnabled(t *testing.T, enabled bool) {
+	t.Helper()
+
+	originalDisable := flags.DisableWebSsh
+	originalEnable := flags.EnableRemoteControl
+	flags.DisableWebSsh = !enabled
+	flags.EnableRemoteControl = enabled
+	t.Cleanup(func() {
+		flags.DisableWebSsh = originalDisable
+		flags.EnableRemoteControl = originalEnable
+	})
+}
+
 func setTaskOutputLimit(t *testing.T, limit int) {
 	t.Helper()
 
@@ -206,6 +232,16 @@ func setTaskOutputLimit(t *testing.T, limit int) {
 	taskOutputLimit = limit
 	t.Cleanup(func() {
 		taskOutputLimit = originalLimit
+	})
+}
+
+func setTaskCommandAudit(t *testing.T, enabled bool) {
+	t.Helper()
+
+	originalAudit := flags.AuditTaskCommands
+	flags.AuditTaskCommands = enabled
+	t.Cleanup(func() {
+		flags.AuditTaskCommands = originalAudit
 	})
 }
 
@@ -323,4 +359,11 @@ func delayedOutputTaskCommand(delay time.Duration, output string) string {
 		return fmt.Sprintf("printf '%s'", output)
 	}
 	return fmt.Sprintf("sleep %.3f; printf '%s'", delay.Seconds(), output)
+}
+
+func auditedTaskCommand() string {
+	if runtime.GOOS == "windows" {
+		return "Write-Output 'audit-ok'; # token=secret Authorization: Bearer abc123 --token supersecret"
+	}
+	return "printf 'audit-ok' # token=secret Authorization: Bearer abc123 --token supersecret"
 }

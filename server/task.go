@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,28 @@ var taskOutputLimit = defaultTaskOutputLimit
 var taskConcurrencyLimit = defaultTaskConcurrencyLimit
 var taskResultUploader = uploadTaskResult
 
+var taskCommandAuditPatterns = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{
+		pattern:     regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)([^\s'";]+)`),
+		replacement: `${1}[REDACTED]`,
+	},
+	{
+		pattern:     regexp.MustCompile(`(?i)(--(?:token|password|passwd|secret|api[-_]?key|cf-access-client-secret)(?:=|\s+))([^\s'";]+)`),
+		replacement: `${1}[REDACTED]`,
+	},
+	{
+		pattern:     regexp.MustCompile(`(?i)([?&](?:token|password|passwd|secret|api[-_]?key)=)([^&\s'";]+)`),
+		replacement: `${1}[REDACTED]`,
+	},
+	{
+		pattern:     regexp.MustCompile(`(?i)\b((?:token|password|passwd|secret|api[-_]?key)\s*=\s*)([^\s'";]+)`),
+		replacement: `${1}[REDACTED]`,
+	},
+}
+
 var taskExecutionSlotsMu sync.Mutex
 var taskExecutionSlots chan struct{}
 var taskExecutionSlotsLimit int
@@ -39,7 +62,7 @@ func NewTask(task_id, command string) {
 		taskResultUploader(task_id, "No command provided", 0, time.Now())
 		return
 	}
-	if flags.DisableWebSsh {
+	if !flags.RemoteControlEnabled() {
 		taskResultUploader(task_id, "Remote control is disabled.", -1, time.Now())
 		return
 	}
@@ -47,10 +70,21 @@ func NewTask(task_id, command string) {
 	defer releaseTaskSlot()
 
 	startedAt := time.Now()
+	if flags.AuditTaskCommands {
+		log.Printf("Task audit task_id=%s command=%s", task_id, redactTaskCommand(command))
+	}
 	log.Printf("Task started task_id=%s started_at=%s", task_id, startedAt.UTC().Format(time.RFC3339))
 	result, exitCode, outputBytes, finishedAt := executeTaskCommand(command)
 	log.Printf("Task finished task_id=%s finished_at=%s exit_code=%d output_bytes=%d", task_id, finishedAt.UTC().Format(time.RFC3339), exitCode, outputBytes)
 	taskResultUploader(task_id, result, exitCode, finishedAt)
+}
+
+func redactTaskCommand(command string) string {
+	redacted := command
+	for _, auditPattern := range taskCommandAuditPatterns {
+		redacted = auditPattern.pattern.ReplaceAllString(redacted, auditPattern.replacement)
+	}
+	return redacted
 }
 
 func acquireTaskExecutionSlot() func() {
