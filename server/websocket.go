@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,6 +17,48 @@ import (
 	"github.com/komari-monitor/komari-agent/utils"
 	"github.com/komari-monitor/komari-agent/ws"
 )
+
+const defaultMaxControlRequests = 10
+const defaultControlRequestWindow = 10 * time.Second
+
+var controlRequestLimiterMu sync.Mutex
+var controlRequestTimes []time.Time
+
+func controlRequestLimit() int {
+	if flags.MaxControlRequests > 0 {
+		return flags.MaxControlRequests
+	}
+	return defaultMaxControlRequests
+}
+
+func controlRequestWindow() time.Duration {
+	if flags.ControlRequestWindow > 0 {
+		return time.Duration(flags.ControlRequestWindow) * time.Second
+	}
+	return defaultControlRequestWindow
+}
+
+func allowControlRequest(now time.Time) bool {
+	window := controlRequestWindow()
+	limit := controlRequestLimit()
+
+	controlRequestLimiterMu.Lock()
+	defer controlRequestLimiterMu.Unlock()
+
+	cutoff := now.Add(-window)
+	filtered := controlRequestTimes[:0]
+	for _, requestTime := range controlRequestTimes {
+		if requestTime.After(cutoff) {
+			filtered = append(filtered, requestTime)
+		}
+	}
+	controlRequestTimes = filtered
+	if len(controlRequestTimes) >= limit {
+		return false
+	}
+	controlRequestTimes = append(controlRequestTimes, now)
+	return true
+}
 
 func EstablishWebSocketConnection() {
 
@@ -138,6 +181,18 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 		if err != nil {
 			log.Println("Bad ws message:", err)
 			continue
+		}
+		if message.Message == "terminal" || message.TerminalId != "" || message.Message == "exec" || message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
+			if !allowControlRequest(time.Now()) {
+				log.Printf("Remote control request rejected due to rate limiting: message=%s", message.Message)
+				if message.Message == "exec" && message.ExecTaskID != "" {
+					taskResultUploader(message.ExecTaskID, "Remote control request rejected due to rate limiting.", -1, time.Now())
+				}
+				if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
+					writePingResult(conn, message.PingTaskID, message.PingType, -1)
+				}
+				continue
+			}
 		}
 
 		if message.Message == "terminal" || message.TerminalId != "" {

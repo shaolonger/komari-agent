@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,11 +28,23 @@ type pingResultWriter interface {
 const defaultTaskExecutionTimeout = 5 * time.Minute
 const defaultTaskOutputLimit = 128 * 1024
 const defaultTaskConcurrencyLimit = 1
+const defaultMaxConcurrentPings = 2
+const defaultPingMinInterval = 500 * time.Millisecond
+
+var defaultAllowedPingTypes = []string{"tcp", "http"}
+var defaultAllowedPingTCPPorts = []int{80, 443}
 
 var taskExecutionTimeout = defaultTaskExecutionTimeout
 var taskOutputLimit = defaultTaskOutputLimit
 var taskConcurrencyLimit = defaultTaskConcurrencyLimit
 var taskResultUploader = uploadTaskResult
+
+var pingExecutionSlotsMu sync.Mutex
+var pingExecutionSlots chan struct{}
+var pingExecutionSlotsLimit int
+
+var pingRateLimitMu sync.Mutex
+var lastAcceptedPingAt time.Time
 
 var taskCommandAuditPatterns = []struct {
 	pattern     *regexp.Regexp
@@ -272,6 +287,203 @@ func resolveIP(target string) (string, error) {
 	return addrs[0], nil // 返回第一个解析的 IP
 }
 
+func pingAllowedTypes() []string {
+	if strings.TrimSpace(flags.AllowedPingTypes) == "" {
+		return slices.Clone(defaultAllowedPingTypes)
+	}
+
+	rawTypes := strings.Split(flags.AllowedPingTypes, ",")
+	types := make([]string, 0, len(rawTypes))
+	for _, rawType := range rawTypes {
+		pingType := strings.ToLower(strings.TrimSpace(rawType))
+		if pingType == "" {
+			continue
+		}
+		types = append(types, pingType)
+	}
+	if len(types) == 0 {
+		return slices.Clone(defaultAllowedPingTypes)
+	}
+	return types
+}
+
+func pingAllowedPorts() []int {
+	if strings.TrimSpace(flags.AllowedPingTCPPorts) == "" {
+		return slices.Clone(defaultAllowedPingTCPPorts)
+	}
+
+	rawPorts := strings.Split(flags.AllowedPingTCPPorts, ",")
+	ports := make([]int, 0, len(rawPorts))
+	for _, rawPort := range rawPorts {
+		portValue, err := strconv.Atoi(strings.TrimSpace(rawPort))
+		if err != nil || portValue <= 0 || portValue > 65535 {
+			continue
+		}
+		ports = append(ports, portValue)
+	}
+	if len(ports) == 0 {
+		return slices.Clone(defaultAllowedPingTCPPorts)
+	}
+	return ports
+}
+
+func pingConcurrencyLimit() int {
+	if flags.MaxConcurrentPings > 0 {
+		return flags.MaxConcurrentPings
+	}
+	return defaultMaxConcurrentPings
+}
+
+func pingMinInterval() time.Duration {
+	if flags.PingMinIntervalMillis > 0 {
+		return time.Duration(flags.PingMinIntervalMillis) * time.Millisecond
+	}
+	return defaultPingMinInterval
+}
+
+func tryAcquirePingExecutionSlot() (func(), bool) {
+	limit := pingConcurrencyLimit()
+	if limit < 1 {
+		limit = 1
+	}
+
+	pingExecutionSlotsMu.Lock()
+	if pingExecutionSlots == nil || pingExecutionSlotsLimit != limit {
+		pingExecutionSlots = make(chan struct{}, limit)
+		pingExecutionSlotsLimit = limit
+	}
+	slots := pingExecutionSlots
+	pingExecutionSlotsMu.Unlock()
+
+	select {
+	case slots <- struct{}{}:
+		return func() {
+			<-slots
+		}, true
+	default:
+		return func() {}, false
+	}
+}
+
+func allowPingNow() bool {
+	interval := pingMinInterval()
+	pingRateLimitMu.Lock()
+	defer pingRateLimitMu.Unlock()
+
+	now := time.Now()
+	if !lastAcceptedPingAt.IsZero() && now.Sub(lastAcceptedPingAt) < interval {
+		return false
+	}
+	lastAcceptedPingAt = now
+	return true
+}
+
+func pingTypeAllowed(pingType string) bool {
+	normalizedType := strings.ToLower(strings.TrimSpace(pingType))
+	for _, allowedType := range pingAllowedTypes() {
+		if normalizedType == allowedType {
+			return true
+		}
+	}
+	return false
+}
+
+func pingPortAllowed(port int) bool {
+	for _, allowedPort := range pingAllowedPorts() {
+		if port == allowedPort {
+			return true
+		}
+	}
+	return false
+}
+
+func parsePingTarget(pingType, pingTarget string) (string, int, error) {
+	pingType = strings.ToLower(strings.TrimSpace(pingType))
+	trimmedTarget := strings.TrimSpace(pingTarget)
+	if trimmedTarget == "" {
+		return "", 0, errors.New("empty ping target")
+	}
+
+	switch pingType {
+	case "icmp":
+		host := trimmedTarget
+		if splitHost, _, err := net.SplitHostPort(trimmedTarget); err == nil {
+			host = splitHost
+		}
+		host = strings.Trim(host, "[]")
+		return host, 0, nil
+	case "tcp":
+		host, port, err := net.SplitHostPort(trimmedTarget)
+		if err != nil {
+			host = trimmedTarget
+			port = "80"
+		}
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber <= 0 || portNumber > 65535 {
+			return "", 0, errors.New("invalid tcp ping port")
+		}
+		return strings.Trim(host, "[]"), portNumber, nil
+	case "http":
+		urlValue := trimmedTarget
+		if !strings.HasPrefix(urlValue, "http://") && !strings.HasPrefix(urlValue, "https://") {
+			urlValue = "http://" + urlValue
+		}
+		parsedURL, err := http.NewRequest("GET", urlValue, nil)
+		if err != nil {
+			return "", 0, errors.New("invalid http ping target")
+		}
+		if parsedURL.URL.Hostname() == "" {
+			return "", 0, errors.New("invalid http ping host")
+		}
+		portNumber := 80
+		if parsedURL.URL.Scheme == "https" {
+			portNumber = 443
+		}
+		if parsedURL.URL.Port() != "" {
+			portNumber, err = strconv.Atoi(parsedURL.URL.Port())
+			if err != nil || portNumber <= 0 || portNumber > 65535 {
+				return "", 0, errors.New("invalid http ping port")
+			}
+		}
+		return parsedURL.URL.Hostname(), portNumber, nil
+	default:
+		return "", 0, errors.New("unsupported ping type")
+	}
+}
+
+func pingTargetAllowed(pingType, pingTarget string) error {
+	if !pingTypeAllowed(pingType) {
+		return fmt.Errorf("ping type %s is not allowed", pingType)
+	}
+
+	host, port, err := parsePingTarget(pingType, pingTarget)
+	if err != nil {
+		return err
+	}
+	if port != 0 && !pingPortAllowed(port) {
+		return fmt.Errorf("ping port %d is not allowed", port)
+	}
+
+	resolvedIP, err := resolveIP(host)
+	if err != nil {
+		return err
+	}
+	if flags.AllowPrivatePingTargets {
+		return nil
+	}
+
+	ip, ok := netip.AddrFromSlice(net.ParseIP(resolvedIP))
+	if !ok {
+		return errors.New("failed to parse ping target address")
+	}
+	ip = ip.Unmap()
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return fmt.Errorf("ping target %s resolves to a restricted address", host)
+	}
+
+	return nil
+}
+
 func icmpPing(target string, timeout time.Duration) (int64, error) {
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
@@ -378,6 +590,23 @@ func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string
 	}
 	if !flags.PingEnabled() {
 		log.Printf("Ping task %d rejected: ping capability is disabled", taskID)
+		writePingResult(conn, taskID, pingType, -1)
+		return
+	}
+	if err := pingTargetAllowed(pingType, pingTarget); err != nil {
+		log.Printf("Ping task %d rejected: %v", taskID, err)
+		writePingResult(conn, taskID, pingType, -1)
+		return
+	}
+	releasePingSlot, ok := tryAcquirePingExecutionSlot()
+	if !ok {
+		log.Printf("Ping task %d rejected: concurrent ping limit reached", taskID)
+		writePingResult(conn, taskID, pingType, -1)
+		return
+	}
+	defer releasePingSlot()
+	if !allowPingNow() {
+		log.Printf("Ping task %d rejected: ping rate limit reached", taskID)
 		writePingResult(conn, taskID, pingType, -1)
 		return
 	}

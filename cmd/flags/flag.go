@@ -8,6 +8,13 @@ type Config struct {
 	EnableRemoteExec     bool    `json:"enable_remote_exec" env:"AGENT_ENABLE_REMOTE_EXEC"`           // 显式启用远程命令执行
 	EnableTerminal       bool    `json:"enable_terminal" env:"AGENT_ENABLE_TERMINAL"`                 // 显式启用远程终端
 	EnablePing           bool    `json:"enable_ping" env:"AGENT_ENABLE_PING"`                         // 显式启用远程 ping 探测
+	AllowPrivatePingTargets bool `json:"allow_private_ping_targets" env:"AGENT_ALLOW_PRIVATE_PING_TARGETS"` // 允许 ping 私有/敏感地址
+	AllowedPingTypes     string  `json:"allowed_ping_types" env:"AGENT_ALLOWED_PING_TYPES"`           // 允许的 ping 类型，逗号分隔
+	AllowedPingTCPPorts  string  `json:"allowed_ping_tcp_ports" env:"AGENT_ALLOWED_PING_TCP_PORTS"`   // 允许的 TCP/HTTP ping 端口，逗号分隔
+	MaxConcurrentPings   int     `json:"max_concurrent_pings" env:"AGENT_MAX_CONCURRENT_PINGS"`       // 单机允许的最大并发 ping 任务数
+	PingMinIntervalMillis int    `json:"ping_min_interval_millis" env:"AGENT_PING_MIN_INTERVAL_MILLIS"` // 两次 ping 任务之间的最小间隔，毫秒
+	MaxControlRequests   int     `json:"max_control_requests" env:"AGENT_MAX_CONTROL_REQUESTS"`       // 控制请求窗口内允许的最大请求数
+	ControlRequestWindow int     `json:"control_request_window" env:"AGENT_CONTROL_REQUEST_WINDOW"`   // 控制请求限流窗口，秒
 	AuditTaskCommands    bool    `json:"audit_task_commands" env:"AGENT_AUDIT_TASK_COMMANDS"`         // 显式开启任务命令审计日志
 	MaxTerminalSessions  int     `json:"max_terminal_sessions" env:"AGENT_MAX_TERMINAL_SESSIONS"`     // 单机允许的最大终端会话数
 	TerminalIdleTimeout  int     `json:"terminal_idle_timeout" env:"AGENT_TERMINAL_IDLE_TIMEOUT"`     // 终端空闲超时，单位秒
