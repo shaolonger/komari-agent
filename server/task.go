@@ -241,21 +241,15 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 	}
 
 	jsonData, _ := json.Marshal(payload)
-	endpoint := flags.Endpoint + "/api/clients/task/result?token=" + flags.Token
+	endpoint := buildClientAPIEndpoint("/api/clients/task/result", nil)
 
 	// 创建HTTP请求以支持自定义头部
-	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonData))
+	req, err := newClientRequest("POST", endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Failed to create task result request: %v", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	// 添加Cloudflare Access头部（如果配置了）
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
+	"net/url"
 	"sync"
 	"time"
 
@@ -61,9 +61,7 @@ func allowControlRequest(now time.Time) bool {
 }
 
 func EstablishWebSocketConnection() {
-
-	websocketEndpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/report?token=" + flags.Token
-	websocketEndpoint = "ws" + strings.TrimPrefix(websocketEndpoint, "http")
+	websocketEndpoint := buildClientWebSocketEndpoint("/api/clients/report", nil)
 
 	// 转换中文域名为 ASCII 兼容编码
 	if convertedEndpoint, err := utils.ConvertIDNToASCII(websocketEndpoint); err == nil {
@@ -196,7 +194,7 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 		}
 
 		if message.Message == "terminal" || message.TerminalId != "" {
-			go establishTerminalConnection(flags.Token, message.TerminalId, flags.Endpoint)
+			go establishTerminalConnection(message.TerminalId)
 			continue
 		}
 		if message.Message == "exec" {
@@ -213,9 +211,8 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 // connectWebSocket attempts to establish a WebSocket connection and upload basic info
 
 // establishTerminalConnection 建立终端连接并使用terminal包处理终端操作
-func establishTerminalConnection(token, id, endpoint string) {
-	endpoint = strings.TrimSuffix(endpoint, "/") + "/api/clients/terminal?token=" + token + "&id=" + id
-	endpoint = "ws" + strings.TrimPrefix(endpoint, "http")
+func establishTerminalConnection(id string) {
+	endpoint := buildClientWebSocketEndpoint("/api/clients/terminal", url.Values{"id": []string{id}})
 
 	// 转换中文域名为 ASCII 兼容编码
 	if convertedEndpoint, err := utils.ConvertIDNToASCII(endpoint); err == nil {
@@ -258,9 +255,6 @@ func newWSDialer() *websocket.Dialer {
 // newWSHeaders 统一构造 WS 请求头（含 Cloudflare Access 头）
 func newWSHeaders() http.Header {
 	headers := http.Header{}
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		headers.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		headers.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
+	applyClientAuthHeaders(headers)
 	return headers
 }

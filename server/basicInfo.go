@@ -72,23 +72,17 @@ func uploadBasicInfo() error {
 }
 
 func tryUploadData(data map[string]interface{}) error {
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/uploadBasicInfo?token=" + flags.Token
+	endpoint := buildClientAPIEndpoint("/api/clients/uploadBasicInfo", nil)
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", endpoint, strings.NewReader(string(payload)))
+	req, err := newClientRequest("POST", endpoint, strings.NewReader(string(payload)))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	// 添加Cloudflare Access头部
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
 
 	client := dnsresolver.GetHTTPClient(30 * time.Second)
 

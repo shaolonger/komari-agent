@@ -63,12 +63,12 @@ Date: 2026-05-26
 
 ### 1.1 HTTP/WS 认证迁移
 
-- [ ] 将以下客户端请求从 `?token=` 迁移为 `Authorization: Bearer <token>`：
-- [ ] `server/websocket.go` 主 WebSocket 上报连接。
-- [ ] `server/websocket.go` 终端 WebSocket 连接。
-- [ ] `server/basicInfo.go` 基础信息上报。
-- [ ] `server/task.go` 任务结果回传。
-- [ ] 与服务端同步修改接口，确保 Header 认证与 WebSocket 握手兼容。
+- [x] 将以下客户端请求从 `?token=` 迁移为 `Authorization: Bearer <token>`：
+- [x] `server/websocket.go` 主 WebSocket 上报连接。
+- [x] `server/websocket.go` 终端 WebSocket 连接。
+- [x] `server/basicInfo.go` 基础信息上报。
+- [x] `server/task.go` 任务结果回传。
+- [x] 与服务端同步修改接口，确保 Header 认证与 WebSocket 握手兼容。
 - [ ] 设计兼容期策略：新旧协议是否并行、并行多久、何时移除查询串。
 
 ### 1.2 TLS 风险收敛
@@ -211,7 +211,7 @@ Date: 2026-05-26
 
 ### 5.1 自动化测试补齐
 
-- [ ] 为 Header 认证迁移增加单元测试和集成测试。
+- [x] 为 Header 认证迁移增加单元测试和集成测试。
 - [x] 为自动发现文件权限增加平台相关测试。
 - [x] 为更新校验逻辑增加正向与篡改样本测试。
 - [x] 为 `--ignore-unsafe-cert` 的限制行为增加测试。
