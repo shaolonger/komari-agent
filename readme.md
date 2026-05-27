@@ -86,10 +86,12 @@
 cosign verify-blob \
 	--signature komari-agent-linux-amd64.sha256.sig \
 	--certificate komari-agent-linux-amd64.sha256.pem \
-	--certificate-identity-regexp 'https://github.com/komari-monitor/komari-agent/.github/workflows/release.yml@refs/tags/.*' \
+	--certificate-identity-regexp 'https://github.com/shaolonger/komari-agent/.github/workflows/release.yml@refs/tags/.*' \
 	--certificate-oidc-issuer https://token.actions.githubusercontent.com \
 	komari-agent-linux-amd64.sha256
 ```
+
+若你校验的是别的 fork 或上游仓库发布的资产，请把 `--certificate-identity-regexp` 中的仓库路径改成对应仓库。
 
 3. 在联网主机完成签名校验和哈希校验后，再把已验证的文件传到离线主机。
 

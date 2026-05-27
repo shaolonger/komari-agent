@@ -546,10 +546,10 @@ fi
 
 if [ -n "$github_proxy" ]; then
     # Use proxy for GitHub releases
-    download_url="${github_proxy}/https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="${github_proxy}/https://github.com/shaolonger/komari-agent/releases/${download_path}/${file_name}"
 else
     # Direct access to GitHub releases
-    download_url="https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="https://github.com/shaolonger/komari-agent/releases/${download_path}/${file_name}"
 fi
 
 checksum_url="${download_url}.sha256"

@@ -45,7 +45,7 @@ try {
     Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'verify-install-sh-integrity.sh') -BashExecutable $bashCommand.Source
 
     if (-not $SkipLiveReleaseCheck) {
-        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/komari-monitor/komari-agent/releases/latest' -UseBasicParsing
+        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/shaolonger/komari-agent/releases/latest' -UseBasicParsing
         $assetNames = @($release.assets | Select-Object -ExpandProperty name)
         $binaryAssets = @($assetNames | Where-Object { $_ -notmatch '\.(sha256|sig|pem)$' })
         $missingChecksums = @($binaryAssets | Where-Object { "$_.sha256" -notin $assetNames })
