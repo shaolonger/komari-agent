@@ -8,6 +8,40 @@ function Log-Error { param([string]$Message) Write-Host "[ERROR] $Message"    -F
 function Log-Step { param([string]$Message) Write-Host "$Message"    -ForegroundColor Magenta }
 function Log-Config { param([string]$Message) Write-Host "- $Message"    -ForegroundColor White }
 
+function Format-KomariUrlForLog {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -eq '(direct)') {
+        return $Value
+    }
+
+    $redactedValue = $Value -replace '://[^/@\s]+:[^/@\s]+@', '://<redacted>@'
+    return [System.Text.RegularExpressions.Regex]::Replace(
+        $redactedValue,
+        '([?&](?:token|key|secret|signature|sig|auth|password|access_token|client_secret)=)[^&#\s]+',
+        '$1<redacted>',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+}
+
+function Format-KomariArgValueForLog {
+    param(
+        [string]$Flag,
+        [string]$Value
+    )
+
+    switch ($Flag) {
+        '--token' { return '<redacted>' }
+        '-t' { return '<redacted>' }
+        '--auto-discovery' { return '<redacted>' }
+        '--cf-access-client-secret' { return '<redacted>' }
+        '--cf-access-client-id' { return '<redacted>' }
+        '--endpoint' { return Format-KomariUrlForLog -Value $Value }
+        '-e' { return Format-KomariUrlForLog -Value $Value }
+        default { return $Value }
+    }
+}
+
 function Format-KomariArgsForLog {
     param([string[]]$Arguments)
 
@@ -18,7 +52,7 @@ function Format-KomariArgsForLog {
             '^--token$' {
                 $displayArgs.Add($arg)
                 if ($i + 1 -lt $Arguments.Count) {
-                    $displayArgs.Add('<redacted>')
+                    $displayArgs.Add((Format-KomariArgValueForLog -Flag $arg -Value $Arguments[$i + 1]))
                     $i++
                 }
                 continue
@@ -26,7 +60,47 @@ function Format-KomariArgsForLog {
             '^-t$' {
                 $displayArgs.Add($arg)
                 if ($i + 1 -lt $Arguments.Count) {
-                    $displayArgs.Add('<redacted>')
+                    $displayArgs.Add((Format-KomariArgValueForLog -Flag $arg -Value $Arguments[$i + 1]))
+                    $i++
+                }
+                continue
+            }
+            '^--auto-discovery$' {
+                $displayArgs.Add($arg)
+                if ($i + 1 -lt $Arguments.Count) {
+                    $displayArgs.Add((Format-KomariArgValueForLog -Flag $arg -Value $Arguments[$i + 1]))
+                    $i++
+                }
+                continue
+            }
+            '^--cf-access-client-secret$' {
+                $displayArgs.Add($arg)
+                if ($i + 1 -lt $Arguments.Count) {
+                    $displayArgs.Add((Format-KomariArgValueForLog -Flag $arg -Value $Arguments[$i + 1]))
+                    $i++
+                }
+                continue
+            }
+            '^--cf-access-client-id$' {
+                $displayArgs.Add($arg)
+                if ($i + 1 -lt $Arguments.Count) {
+                    $displayArgs.Add((Format-KomariArgValueForLog -Flag $arg -Value $Arguments[$i + 1]))
+                    $i++
+                }
+                continue
+            }
+            '^--endpoint$' {
+                $displayArgs.Add($arg)
+                if ($i + 1 -lt $Arguments.Count) {
+                    $displayArgs.Add((Format-KomariArgValueForLog -Flag $arg -Value $Arguments[$i + 1]))
+                    $i++
+                }
+                continue
+            }
+            '^-e$' {
+                $displayArgs.Add($arg)
+                if ($i + 1 -lt $Arguments.Count) {
+                    $displayArgs.Add((Format-KomariArgValueForLog -Flag $arg -Value $Arguments[$i + 1]))
                     $i++
                 }
                 continue
@@ -37,6 +111,26 @@ function Format-KomariArgsForLog {
             }
             '^-t=' {
                 $displayArgs.Add('-t=<redacted>')
+                continue
+            }
+            '^--auto-discovery=' {
+                $displayArgs.Add('--auto-discovery=<redacted>')
+                continue
+            }
+            '^--cf-access-client-secret=' {
+                $displayArgs.Add('--cf-access-client-secret=<redacted>')
+                continue
+            }
+            '^--cf-access-client-id=' {
+                $displayArgs.Add('--cf-access-client-id=<redacted>')
+                continue
+            }
+            '^--endpoint=' {
+                $displayArgs.Add("--endpoint=$(Format-KomariArgValueForLog -Flag '--endpoint' -Value $arg.Substring('--endpoint='.Length))")
+                continue
+            }
+            '^-e=' {
+                $displayArgs.Add("-e=$(Format-KomariArgValueForLog -Flag '-e' -Value $arg.Substring('-e='.Length))")
                 continue
             }
             default {
@@ -142,7 +236,7 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 }
 
 # Prepare GitHub proxy display
-if ($GitHubProxy -ne '') { $ProxyDisplay = $GitHubProxy } else { $ProxyDisplay = '(direct)' }
+if ($GitHubProxy -ne '') { $ProxyDisplay = Format-KomariUrlForLog -Value $GitHubProxy } else { $ProxyDisplay = '(direct)' }
 $ConfigFile = Join-Path $InstallDir 'komari-agent.json'
 $LegacyTokenFile = Join-Path $InstallDir 'komari-agent.token'
 if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
@@ -359,7 +453,7 @@ $DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/komari-monit
 
 # Download and install
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-Log-Info "URL: $DownloadUrl"
+Log-Info "URL: $(Format-KomariUrlForLog -Value $DownloadUrl)"
 try {
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $AgentPath -UseBasicParsing
 }

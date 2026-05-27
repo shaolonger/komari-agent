@@ -35,6 +35,39 @@ log_config() {
     echo -e "${CYAN}[CONFIG]${NC} $1"
 }
 
+redact_url_for_log() {
+    local raw_value="$1"
+    local redacted_value="$raw_value"
+
+    if [ -z "$redacted_value" ] || [ "$redacted_value" = "(direct)" ]; then
+        printf '%s' "$redacted_value"
+        return
+    fi
+
+    redacted_value="$(printf '%s' "$redacted_value" | sed -E \
+        -e 's#://[^/@[:space:]]+:[^/@[:space:]]+@#://<redacted>@#g' \
+        -e 's#([?&](token|key|secret|signature|sig|auth|password|access_token|client_secret)=)[^&#[:space:]]+#\1<redacted>#g')"
+
+    printf '%s' "$redacted_value"
+}
+
+redact_arg_value_for_log() {
+    local flag="$1"
+    local value="$2"
+
+    case "$flag" in
+        --token|-t|--auto-discovery|--cf-access-client-secret|--cf-access-client-id)
+            printf '<redacted>'
+            ;;
+        --endpoint|-e)
+            redact_url_for_log "$value"
+            ;;
+        *)
+            printf '%s' "$value"
+            ;;
+    esac
+}
+
 json_escape() {
     local value="$1"
 
@@ -71,24 +104,24 @@ EOF
 redact_komari_args() {
     local raw_args="$1"
     local redacted_args=""
-    local redact_next=false
+    local pending_flag=""
     local arg
 
     # shellcheck disable=SC2086
     for arg in $raw_args; do
-        if [ "$redact_next" = true ]; then
-            redacted_args="$redacted_args <redacted>"
-            redact_next=false
+        if [ -n "$pending_flag" ]; then
+            redacted_args="$redacted_args $(redact_arg_value_for_log "$pending_flag" "$arg")"
+            pending_flag=""
             continue
         fi
 
         case "$arg" in
-            --token|-t)
+            --token|-t|--auto-discovery|--cf-access-client-secret|--cf-access-client-id|--endpoint|-e)
                 redacted_args="$redacted_args $arg"
-                redact_next=true
+                pending_flag="$arg"
                 ;;
-            --token=*|-t=*)
-                redacted_args="$redacted_args ${arg%%=*}=<redacted>"
+            --token=*|-t=*|--auto-discovery=*|--cf-access-client-secret=*|--cf-access-client-id=*|--endpoint=*|-e=*)
+                redacted_args="$redacted_args ${arg%%=*}=$(redact_arg_value_for_log "${arg%%=*}" "${arg#*=}")"
                 ;;
             *)
                 redacted_args="$redacted_args $arg"
@@ -216,6 +249,7 @@ if [ -n "$komari_token" ]; then
 fi
 komari_service_args="${komari_service_args# }"
 komari_service_args_log="$(redact_komari_args "$komari_service_args")"
+github_proxy_log="$(redact_url_for_log "${github_proxy:-"(direct)"}")"
 
 # macOS doesn't always require sudo for everything
 if [ "$os_name" = "darwin" ] && command -v brew >/dev/null 2>&1; then
@@ -237,7 +271,7 @@ echo ""
 log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
-log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
+log_config "  GitHub proxy: ${GREEN}$github_proxy_log${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_service_args_log${NC}"
 if [ -n "$komari_token" ]; then
     log_config "  Config file: ${GREEN}$komari_config_file${NC}"
@@ -432,10 +466,10 @@ mkdir -p "$target_dir"
 # Download binary
 if [ -n "$github_proxy" ]; then
     log_step "Downloading $file_name via proxy..."
-    log_info "URL: ${CYAN}$download_url${NC}"
+    log_info "URL: ${CYAN}$(redact_url_for_log "$download_url")${NC}"
 else
     log_step "Downloading $file_name directly..."
-    log_info "URL: ${CYAN}$download_url${NC}"
+    log_info "URL: ${CYAN}$(redact_url_for_log "$download_url")${NC}"
 fi
 if ! curl -L -o "$komari_agent_path" "$download_url"; then
     log_error "Download failed"

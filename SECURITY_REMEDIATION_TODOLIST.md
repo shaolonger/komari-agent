@@ -111,7 +111,7 @@ Date: 2026-05-26
 - [x] 安装脚本禁止把 token 原样输出到日志。
 - [x] 安装脚本禁止把 token 直接写进 systemd/OpenRC/procd/launchd/Windows 服务命令行。
 - [x] 优先改为环境变量文件、权限受控的 JSON 配置文件或系统凭据存储。
-- [ ] 审核 `install.sh` 与 `install.ps1` 的所有日志输出点，加入敏感参数脱敏。
+- [x] 审核 `install.sh` 与 `install.ps1` 的所有日志输出点，加入敏感参数脱敏。
 - [ ] 审核 Dockerfile 与文档示例，移除 `-t token` 这类明文示例。
 
 ### 2.3 运维迁移工作
