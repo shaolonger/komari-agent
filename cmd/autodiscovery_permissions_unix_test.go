@@ -5,6 +5,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,5 +35,31 @@ func TestSaveAutoDiscoveryConfigTightensExistingPermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != autoDiscoveryConfigFilePerm {
 		t.Fatalf("file mode = %o, want %o", got, autoDiscoveryConfigFilePerm)
+	}
+}
+
+func TestLoadAutoDiscoveryConfigRejectsPermissiveFileMode(t *testing.T) {
+	baseDir := t.TempDir()
+	configPath := filepath.Join(baseDir, "config", autoDiscoveryConfigDirName, autoDiscoveryConfigFileName)
+	legacyPath := filepath.Join(baseDir, "legacy", autoDiscoveryConfigFileName)
+	useAutoDiscoveryPaths(t, configPath, legacyPath)
+	if err := os.MkdirAll(filepath.Dir(configPath), autoDiscoveryConfigDirPerm); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+
+	data := []byte("{\n  \"uuid\": \"test-uuid\",\n  \"token\": \"test-token\"\n}")
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(configPath, 0o644); err != nil {
+		t.Fatalf("os.Chmod() error = %v", err)
+	}
+
+	_, err := loadAutoDiscoveryConfig()
+	if err == nil {
+		t.Fatal("loadAutoDiscoveryConfig() error = nil, want permission error")
+	}
+	if !strings.Contains(err.Error(), "too permissive") {
+		t.Fatalf("loadAutoDiscoveryConfig() error = %v, want permission check failure", err)
 	}
 }

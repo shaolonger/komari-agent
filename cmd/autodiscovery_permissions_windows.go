@@ -36,6 +36,53 @@ func buildAutoDiscoveryFileSDDL(ownerSID string) string {
 	return builder.String()
 }
 
+func expectedWindowsAutoDiscoveryTrustees(owner *windows.SID) []string {
+	trustees := []string{autoDiscoveryAdministratorsSID, autoDiscoveryLocalSystemSID}
+	if owner == nil {
+		return trustees
+	}
+	if owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || owner.IsWellKnown(windows.WinLocalSystemSid) {
+		return trustees
+	}
+	return append(trustees, owner.String())
+}
+
+func validateAutoDiscoveryConfigPermissions(path string) error {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("get file security info: %w", err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return fmt.Errorf("get file owner sid: %w", err)
+	}
+	if owner == nil || !owner.IsValid() {
+		return fmt.Errorf("get file owner sid: invalid owner sid")
+	}
+
+	sddl := sd.String()
+	daclIndex := strings.Index(sddl, "D:")
+	if daclIndex == -1 {
+		return fmt.Errorf("missing dacl in security descriptor %q", sddl)
+	}
+	dacl := sddl[daclIndex:]
+	if !strings.HasPrefix(dacl, "D:P") {
+		return fmt.Errorf("dacl is not protected: %q", dacl)
+	}
+
+	trustees := expectedWindowsAutoDiscoveryTrustees(owner)
+	if aceCount := strings.Count(dacl, "("); aceCount != len(trustees) {
+		return fmt.Errorf("unexpected ace count %d in dacl %q", aceCount, dacl)
+	}
+	for _, trustee := range trustees {
+		if !strings.Contains(dacl, trustee) {
+			return fmt.Errorf("missing trustee %q in dacl %q", trustee, dacl)
+		}
+	}
+
+	return nil
+}
+
 func enforceAutoDiscoveryConfigPermissions(path string) error {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {

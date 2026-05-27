@@ -85,11 +85,21 @@ func readAutoDiscoveryConfig(path string) (*AutoDiscoveryConfig, error) {
 	return &config, nil
 }
 
+func loadAutoDiscoveryConfigFromPath(path string) (*AutoDiscoveryConfig, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	if err := validateAutoDiscoveryConfigPermissions(path); err != nil {
+		return nil, fmt.Errorf("invalid auto-discovery config permissions for %s: %w", path, err)
+	}
+	return readAutoDiscoveryConfig(path)
+}
+
 // loadAutoDiscoveryConfig 加载自动发现配置
 func loadAutoDiscoveryConfig() (*AutoDiscoveryConfig, error) {
 	configPath := autoDiscoveryConfigPath()
 
-	config, err := readAutoDiscoveryConfig(configPath)
+	config, err := loadAutoDiscoveryConfigFromPath(configPath)
 	if err == nil {
 		return config, nil
 	}
