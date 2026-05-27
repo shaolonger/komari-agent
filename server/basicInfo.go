@@ -6,10 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari-agent/dnsresolver"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 	"github.com/komari-monitor/komari-agent/update"
 
@@ -78,13 +76,12 @@ func tryUploadData(data map[string]interface{}) error {
 		return err
 	}
 
-	req, err := newClientRequest("POST", endpoint, strings.NewReader(string(payload)))
+	req, err := newJSONClientRequest("POST", endpoint, payload)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
 
-	client := dnsresolver.GetHTTPClient(30 * time.Second)
+	client := newControlPlaneHTTPClient(30 * time.Second)
 
 	resp, err := client.Do(req)
 	if err != nil {

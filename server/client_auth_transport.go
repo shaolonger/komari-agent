@@ -1,10 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/komari-monitor/komari-agent/dnsresolver"
 )
 
 func buildClientAPIEndpoint(path string, query url.Values) string {
@@ -41,4 +45,32 @@ func newClientRequest(method, endpoint string, body io.Reader) (*http.Request, e
 	}
 	applyClientAuthHeaders(req.Header)
 	return req, nil
+}
+
+func newJSONClientRequest(method, endpoint string, payload []byte) (*http.Request, error) {
+	req, err := newClientRequest(method, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(payload)), nil
+	}
+	return req, nil
+}
+
+func resetRequestBody(req *http.Request) error {
+	if req.GetBody == nil {
+		return nil
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return err
+	}
+	req.Body = body
+	return nil
+}
+
+func newControlPlaneHTTPClient(timeout time.Duration) *http.Client {
+	return dnsresolver.GetHTTPClient(timeout)
 }

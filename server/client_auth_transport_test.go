@@ -1,6 +1,7 @@
 package server
 
 import (
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -74,5 +75,44 @@ func TestNewWSHeadersAddsBearerAuthorization(t *testing.T) {
 	headers := newWSHeaders()
 	if got := headers.Get("Authorization"); got != "Bearer secret-token" {
 		t.Fatalf("Authorization header = %q, want %q", got, "Bearer secret-token")
+	}
+}
+
+func TestNewJSONClientRequestSupportsRetryableBodies(t *testing.T) {
+	useServerFlagsSnapshot(t)
+
+	flags.Token = "secret-token"
+	payload := []byte(`{"status":"ok"}`)
+
+	req, err := newJSONClientRequest(http.MethodPost, "https://example.com/api/clients/task/result", payload)
+	if err != nil {
+		t.Fatalf("newJSONClientRequest() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want %q", got, "application/json")
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		t.Fatalf("req.GetBody() error = %v", err)
+	}
+	defer body.Close()
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("io.ReadAll() error = %v", err)
+	}
+	if string(bodyBytes) != string(payload) {
+		t.Fatalf("retry body = %q, want %q", string(bodyBytes), string(payload))
+	}
+
+	req.Body = io.NopCloser(strings.NewReader("stale"))
+	if err := resetRequestBody(req); err != nil {
+		t.Fatalf("resetRequestBody() error = %v", err)
+	}
+	resetBody, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("io.ReadAll(req.Body) error = %v", err)
+	}
+	if string(resetBody) != string(payload) {
+		t.Fatalf("reset body = %q, want %q", string(resetBody), string(payload))
 	}
 }

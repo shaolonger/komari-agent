@@ -244,19 +244,22 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 	endpoint := buildClientAPIEndpoint("/api/clients/task/result", nil)
 
 	// 创建HTTP请求以支持自定义头部
-	req, err := newClientRequest("POST", endpoint, bytes.NewBuffer(jsonData))
+	req, err := newJSONClientRequest("POST", endpoint, jsonData)
 	if err != nil {
 		log.Printf("Failed to create task result request: %v", err)
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	client := newControlPlaneHTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	maxRetry := flags.MaxRetries
 	for i := 0; i < maxRetry && (err != nil || resp.StatusCode != http.StatusOK); i++ {
 		log.Printf("Failed to upload task result, retrying %d/%d", i+1, maxRetry)
 		time.Sleep(2 * time.Second) // Wait before retrying
+		if resetErr := resetRequestBody(req); resetErr != nil {
+			log.Printf("Failed to reset task result request body: %v", resetErr)
+			break
+		}
 		resp, err = client.Do(req)
 	}
 	if resp != nil {

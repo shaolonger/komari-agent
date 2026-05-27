@@ -25,6 +25,20 @@
 - 若必须把 endpoint、Cloudflare Access 或 auto-discovery 等参数写入配置文件，仍应通过权限受控的 JSON 配置文件管理，而不是散落到多种服务参数中。
 - 生产环境应建立 token 主动轮换和失效流程，避免长期复用同一静态凭据。
 
+## Header 认证迁移策略
+
+- 当前 agent 与服务端都已经切换为 `Authorization: Bearer <token>`；控制面不再接受 `?token=` 查询串作为正式认证方式。
+- 建议的升级顺序是先升级 Komari 服务端，再批量升级 agent；不要把新 agent 长时间指向旧服务端，也不要继续保留 query-token 的并行兼容期。
+- 兼容策略采用 fail-closed：旧版仍使用 `?token=` 的 agent 在升级后会被服务端拒绝，而不是继续静默兼容。
+- 升级后应复核反向代理、WAF、WebSocket 代理和 APM 采集配置，确认不再依赖 URL 查询串中的 token 字段。
+
+## Token 生命周期治理
+
+- 服务端现在支持按 client 维度查询 token 状态，并支持 `rotate`、`revoke`、`reissue` 三类生命周期操作；可选传入 `expires_in_hours` 为新签发 token 设置过期时间。
+- 推荐流程是：日常按周期 `rotate`；发现泄漏或怀疑泄漏时立即 `revoke`；确认需要恢复 agent 接入时再 `reissue` 新 token。
+- 对应的服务端管理接口为 `/api/admin/client/:uuid/token`、`/api/admin/client/:uuid/token/rotate`、`/api/admin/client/:uuid/token/revoke`、`/api/admin/client/:uuid/token/reissue`。
+- token 一旦被 `revoke` 或达到 `expires_at`，服务端会在认证闸门直接拒绝该 token，agent 需要使用新 token 重新建立连接。
+
 ## TLS 信任模型
 
 - agent 默认依赖标准 TLS 证书校验；生产环境不应使用 `--ignore-unsafe-cert`。
