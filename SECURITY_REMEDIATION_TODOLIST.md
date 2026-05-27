@@ -45,7 +45,7 @@ Date: 2026-05-26
 
 - [ ] 检查已部署主机上的 `auto-discovery.json` 是否对非 owner 可读；对现存文件立即收紧权限。
 - [ ] 检查 systemd unit、OpenRC、launchd plist、Windows 服务参数中是否包含 token；如有，迁移到更安全的载入方式。
-- [ ] 清理 Docker 启动命令、运维手册、截图、排障文档中的明文 token 示例。
+- [x] 清理 Docker 启动命令、运维手册、截图、排障文档中的明文 token 示例。
 - [ ] 如代理或网关会记录完整 URL，先临时添加规则屏蔽 `token` 查询串。
 
 ### 0.4 阶段验收

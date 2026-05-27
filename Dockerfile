@@ -15,5 +15,6 @@ RUN touch /.komari-agent-container
 ENTRYPOINT ["/app/komari-agent"]
 # 运行时请指定参数
 # Please specify parameters at runtime.
-# eg: docker run komari-agent -e example.com -t token
+# Prefer a read-only JSON config file instead of passing --token/-t on the command line.
+# eg: docker run --rm -v "$PWD/komari-agent.json:/run/komari-agent/config.json:ro" komari-agent --config /run/komari-agent/config.json
 CMD ["--help"]
