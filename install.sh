@@ -35,6 +35,38 @@ log_config() {
     echo -e "${CYAN}[CONFIG]${NC} $1"
 }
 
+redact_komari_args() {
+    local raw_args="$1"
+    local redacted_args=""
+    local redact_next=false
+    local arg
+
+    # shellcheck disable=SC2086
+    for arg in $raw_args; do
+        if [ "$redact_next" = true ]; then
+            redacted_args="$redacted_args <redacted>"
+            redact_next=false
+            continue
+        fi
+
+        case "$arg" in
+            --token|-t)
+                redacted_args="$redacted_args $arg"
+                redact_next=true
+                ;;
+            --token=*|-t=*)
+                redacted_args="$redacted_args ${arg%%=*}=<redacted>"
+                ;;
+            *)
+                redacted_args="$redacted_args $arg"
+                ;;
+        esac
+    done
+
+    redacted_args="${redacted_args# }"
+    printf '%s' "$redacted_args"
+}
+
 # Default values
 service_name="komari-agent"
 target_dir="/opt/komari"
@@ -104,6 +136,7 @@ done
 
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
+komari_args_log="$(redact_komari_args "$komari_args")"
 
 komari_agent_path="${target_dir}/agent"
 
@@ -128,7 +161,7 @@ log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
-log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
+log_config "  Binary arguments: ${GREEN}$komari_args_log${NC}"
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
 else
@@ -429,7 +462,7 @@ if [ "$init_system" = "nixos" ]; then
     echo -e "${CYAN}  wantedBy = [ \"multi-user.target\" ];${NC}"
     echo -e "${CYAN}  serviceConfig = {${NC}"
     echo -e "${CYAN}    Type = \"simple\";${NC}"
-    echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${komari_args}\";${NC}"
+    echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${komari_args_log}\";${NC}"
     echo -e "${CYAN}    WorkingDirectory = \"${target_dir}\";${NC}"
     echo -e "${CYAN}    Restart = \"always\";${NC}"
     echo -e "${CYAN}    User = \"root\";${NC}"
@@ -654,5 +687,5 @@ else
     log_success "Komari-agent installation completed!"
 fi
 log_config "Service: ${GREEN}$service_name${NC}"
-log_config "Arguments: ${GREEN}$komari_args${NC}"
+log_config "Arguments: ${GREEN}$komari_args_log${NC}"
 echo -e "${WHITE}===========================================${NC}"

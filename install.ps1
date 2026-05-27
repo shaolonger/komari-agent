@@ -8,6 +8,46 @@ function Log-Error { param([string]$Message) Write-Host "[ERROR] $Message"    -F
 function Log-Step { param([string]$Message) Write-Host "$Message"    -ForegroundColor Magenta }
 function Log-Config { param([string]$Message) Write-Host "- $Message"    -ForegroundColor White }
 
+function Format-KomariArgsForLog {
+    param([string[]]$Arguments)
+
+    $displayArgs = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        $arg = $Arguments[$i]
+        switch -Regex ($arg) {
+            '^--token$' {
+                $displayArgs.Add($arg)
+                if ($i + 1 -lt $Arguments.Count) {
+                    $displayArgs.Add('<redacted>')
+                    $i++
+                }
+                continue
+            }
+            '^-t$' {
+                $displayArgs.Add($arg)
+                if ($i + 1 -lt $Arguments.Count) {
+                    $displayArgs.Add('<redacted>')
+                    $i++
+                }
+                continue
+            }
+            '^--token=' {
+                $displayArgs.Add('--token=<redacted>')
+                continue
+            }
+            '^-t=' {
+                $displayArgs.Add('-t=<redacted>')
+                continue
+            }
+            default {
+                $displayArgs.Add($arg)
+            }
+        }
+    }
+
+    return $displayArgs -join ' '
+}
+
 # Default parameters
 $InstallDir = Join-Path $Env:ProgramFiles "Komari"
 $ServiceName = "komari-agent"
@@ -35,6 +75,7 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 
 # Prepare GitHub proxy display
 if ($GitHubProxy -ne '') { $ProxyDisplay = $GitHubProxy } else { $ProxyDisplay = '(direct)' }
+$RedactedArgString = Format-KomariArgsForLog -Arguments $KomariArgs
 
 # Detect architecture early for constructing binary name
 switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -160,7 +201,7 @@ Log-Step "Installation configuration:"
 Log-Config "Service name: $ServiceName"
 Log-Config "Install directory: $InstallDir"
 Log-Config "GitHub proxy: $ProxyDisplay"
-Log-Config "Agent arguments: $($KomariArgs -join ' ')"
+Log-Config "Agent arguments: $RedactedArgString"
 if ($InstallVersion -ne "") {
     Log-Config "Specified agent version: $InstallVersion"
 } else {
@@ -259,4 +300,4 @@ Log-Success "Service $ServiceName installed and started using nssm."
 
 Log-Success "Komari Agent installation completed!"
 Log-Config "Service name: $ServiceName"
-Log-Config "Arguments: $argString"
+Log-Config "Arguments: $RedactedArgString"

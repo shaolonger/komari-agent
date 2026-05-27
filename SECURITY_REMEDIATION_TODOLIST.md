@@ -108,7 +108,7 @@ Date: 2026-05-26
 
 ### 2.2 安装参数与服务定义整改
 
-- [ ] 安装脚本禁止把 token 原样输出到日志。
+- [x] 安装脚本禁止把 token 原样输出到日志。
 - [ ] 安装脚本禁止把 token 直接写进 systemd/OpenRC/procd/launchd/Windows 服务命令行。
 - [ ] 优先改为环境变量文件、权限受控的 JSON 配置文件或系统凭据存储。
 - [ ] 审核 `install.sh` 与 `install.ps1` 的所有日志输出点，加入敏感参数脱敏。
