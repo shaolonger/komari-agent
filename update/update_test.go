@@ -1,7 +1,9 @@
 package update
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -44,6 +46,47 @@ func useUpdateHooks(t *testing.T, updater selfUpdater, updateErr error, exitCode
 		CurrentVersion = previousVersion
 		http.DefaultClient = previousClient
 	})
+}
+
+func captureUpdateLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+
+	return &buf
+}
+
+func assertSanitizedUpdateFailure(t *testing.T, err error, logs string, stage string, sensitive string) {
+	t.Helper()
+
+	wantError := "auto-update failed during " + stage
+	if err == nil {
+		t.Fatal("CheckAndUpdate() error = nil, want non-nil")
+	}
+	if err.Error() != wantError {
+		t.Fatalf("CheckAndUpdate() error = %q, want %q", err.Error(), wantError)
+	}
+	if strings.Contains(err.Error(), sensitive) {
+		t.Fatalf("CheckAndUpdate() error = %q, should not contain sensitive substring %q", err.Error(), sensitive)
+	}
+
+	wantLog := "Auto-update failed during " + stage + "; keeping current version"
+	if !strings.Contains(logs, wantLog) {
+		t.Fatalf("log output = %q, want substring %q", logs, wantLog)
+	}
+	if strings.Contains(logs, sensitive) {
+		t.Fatalf("log output = %q, should not contain sensitive substring %q", logs, sensitive)
+	}
 }
 
 // TestParseVersion 验证 parseVersion 能够解析各种版本号格式，包括带 v/V 前缀、预发布和构建元数据
@@ -124,22 +167,44 @@ func TestSelfUpdateConfigUsesSHA2Validator(t *testing.T) {
 	}
 }
 
+func TestCheckAndUpdateSanitizesVersionParseFailure(t *testing.T) {
+	exitCode := 0
+	useUpdateHooks(t, stubSelfUpdater{}, nil, &exitCode)
+	CurrentVersion = "invalid-version https://updates.example/?token=secret"
+	logs := captureUpdateLogs(t)
+
+	err := CheckAndUpdate()
+	assertSanitizedUpdateFailure(t, err, logs.String(), updateStageVersionParse, "token=secret")
+	if exitCode != 0 {
+		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
+	}
+}
+
+func TestCheckAndUpdateSanitizesUpdaterCreationError(t *testing.T) {
+	exitCode := 0
+	sensitive := "https://updates.example/download?token=secret"
+	useUpdateHooks(t, stubSelfUpdater{}, errors.New(sensitive), &exitCode)
+	logs := captureUpdateLogs(t)
+
+	err := CheckAndUpdate()
+	assertSanitizedUpdateFailure(t, err, logs.String(), updateStageUpdaterInit, sensitive)
+	if exitCode != 0 {
+		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
+	}
+}
+
 func TestCheckAndUpdateDoesNotExitOnUpdaterError(t *testing.T) {
 	exitCode := 0
 	useUpdateHooks(t, stubSelfUpdater{}, nil, &exitCode)
+	logs := captureUpdateLogs(t)
 
-	updateFailure := errors.New("Failed validating asset content: hash mismatch")
+	updateFailure := errors.New("Failed validating asset content for https://updates.example/download?token=secret")
 	newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
 		return stubSelfUpdater{err: updateFailure}, nil
 	}
 
 	err := CheckAndUpdate()
-	if err == nil {
-		t.Fatal("CheckAndUpdate() error = nil, want non-nil")
-	}
-	if !strings.Contains(err.Error(), "failed to check for updates") {
-		t.Fatalf("CheckAndUpdate() error = %q, want substring %q", err.Error(), "failed to check for updates")
-	}
+	assertSanitizedUpdateFailure(t, err, logs.String(), updateStageExecution, "token=secret")
 	if exitCode != 0 {
 		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
 	}

@@ -18,6 +18,12 @@ var (
 	Repo           string = "komari-monitor/komari-agent"
 )
 
+const (
+	updateStageVersionParse = "current version parsing"
+	updateStageUpdaterInit  = "updater initialization"
+	updateStageExecution    = "update retrieval, verification, or installation"
+)
+
 type selfUpdater interface {
 	UpdateSelf(current semver.Version, slug string) (*selfupdate.Release, error)
 }
@@ -27,6 +33,11 @@ var newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
 }
 
 var exitProcess = os.Exit
+
+func failUpdate(stage string) error {
+	log.Printf("Auto-update failed during %s; keeping current version", stage)
+	return fmt.Errorf("auto-update failed during %s", stage)
+}
 
 // parseVersion 解析可能带有 v/V 前缀，以及预发布或构建元数据的版本字符串
 func parseVersion(ver string) (semver.Version, error) {
@@ -60,20 +71,20 @@ func CheckAndUpdate() error {
 	// Parse current version
 	currentSemVer, err := parseVersion(CurrentVersion)
 	if err != nil {
-		return fmt.Errorf("failed to parse current version: %v", err)
+		return failUpdate(updateStageVersionParse)
 	}
 
 	http.DefaultClient = dnsresolver.GetHTTPClient(60 * time.Second)
 	config := selfUpdateConfig()
 	updater, err := newSelfUpdater(config)
 	if err != nil {
-		return fmt.Errorf("failed to create updater: %v", err)
+		return failUpdate(updateStageUpdaterInit)
 	}
 
 	// Check for latest version
 	latest, err := updater.UpdateSelf(currentSemVer, Repo)
 	if err != nil {
-		return fmt.Errorf("failed to check for updates: %v", err)
+		return failUpdate(updateStageExecution)
 	}
 
 	// Determine if update is needed
