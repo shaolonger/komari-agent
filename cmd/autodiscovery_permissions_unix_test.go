@@ -9,8 +9,13 @@ import (
 )
 
 func TestSaveAutoDiscoveryConfigTightensExistingPermissions(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "auto-discovery.json")
-	useAutoDiscoveryConfigPath(t, configPath)
+	baseDir := t.TempDir()
+	configPath := filepath.Join(baseDir, "config", autoDiscoveryConfigDirName, autoDiscoveryConfigFileName)
+	legacyPath := filepath.Join(baseDir, "legacy", autoDiscoveryConfigFileName)
+	useAutoDiscoveryPaths(t, configPath, legacyPath)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
 
 	if err := os.WriteFile(configPath, []byte("{}"), 0o644); err != nil {
 		t.Fatalf("os.WriteFile() error = %v", err)

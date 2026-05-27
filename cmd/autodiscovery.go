@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,9 +17,15 @@ import (
 	"github.com/komari-monitor/komari-agent/utils"
 )
 
-const autoDiscoveryConfigFilePerm os.FileMode = 0o600
+const (
+	autoDiscoveryConfigDirName              = "komari-agent"
+	autoDiscoveryConfigFileName             = "auto-discovery.json"
+	autoDiscoveryConfigDirPerm  os.FileMode = 0o700
+	autoDiscoveryConfigFilePerm os.FileMode = 0o600
+)
 
 var autoDiscoveryConfigPath = getAutoDiscoveryFilePath
+var autoDiscoveryLegacyConfigPath = getLegacyAutoDiscoveryFilePath
 
 // AutoDiscoveryConfig 自动发现配置结构体
 type AutoDiscoveryConfig struct {
@@ -43,56 +50,99 @@ type RegisterResponse struct {
 
 // getAutoDiscoveryFilePath 获取自动发现配置文件路径
 func getAutoDiscoveryFilePath() string {
-	// 获取程序运行目录
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		log.Println("Failed to get user config dir:", err)
+		return getLegacyAutoDiscoveryFilePath()
+	}
+	if configDir == "" {
+		return getLegacyAutoDiscoveryFilePath()
+	}
+	return filepath.Join(configDir, autoDiscoveryConfigDirName, autoDiscoveryConfigFileName)
+}
+
+func getLegacyAutoDiscoveryFilePath() string {
 	execPath, err := os.Executable()
 	if err != nil {
 		log.Println("Failed to get executable path:", err)
-		return "auto-discovery.json"
+		return autoDiscoveryConfigFileName
 	}
 	execDir := filepath.Dir(execPath)
-	return filepath.Join(execDir, "auto-discovery.json")
+	return filepath.Join(execDir, autoDiscoveryConfigFileName)
+}
+
+func readAutoDiscoveryConfig(path string) (*AutoDiscoveryConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read auto-discovery config %s: %w", path, err)
+	}
+
+	var config AutoDiscoveryConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse auto-discovery config %s: %w", path, err)
+	}
+
+	return &config, nil
 }
 
 // loadAutoDiscoveryConfig 加载自动发现配置
 func loadAutoDiscoveryConfig() (*AutoDiscoveryConfig, error) {
 	configPath := autoDiscoveryConfigPath()
 
-	// 检查文件是否存在
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return nil, nil // 文件不存在，返回nil
+	config, err := readAutoDiscoveryConfig(configPath)
+	if err == nil {
+		return config, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 
-	// 读取文件内容
-	data, err := os.ReadFile(configPath)
+	legacyPath := autoDiscoveryLegacyConfigPath()
+	if legacyPath == configPath {
+		return nil, nil
+	}
+
+	legacyConfig, err := readAutoDiscoveryConfig(legacyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read auto-discovery config: %v", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
 	}
 
-	// 解析JSON
-	var config AutoDiscoveryConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse auto-discovery config: %v", err)
+	if err := saveAutoDiscoveryConfig(legacyConfig); err != nil {
+		log.Printf("Failed to migrate auto-discovery config from legacy path %s: %v", legacyPath, err)
+		return legacyConfig, nil
+	}
+	if err := os.Remove(legacyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("Failed to remove legacy auto-discovery config %s: %v", legacyPath, err)
+	} else {
+		log.Printf("Migrated auto-discovery config to: %s", configPath)
 	}
 
-	return &config, nil
+	return legacyConfig, nil
 }
 
 // saveAutoDiscoveryConfig 保存自动发现配置
 func saveAutoDiscoveryConfig(config *AutoDiscoveryConfig) error {
 	configPath := autoDiscoveryConfigPath()
+	configDir := filepath.Dir(configPath)
+	if err := os.MkdirAll(configDir, autoDiscoveryConfigDirPerm); err != nil {
+		return fmt.Errorf("failed to create auto-discovery config dir: %w", err)
+	}
 
 	// 序列化为JSON
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal auto-discovery config: %v", err)
+		return fmt.Errorf("failed to marshal auto-discovery config: %w", err)
 	}
 
 	// 写入文件
 	if err := os.WriteFile(configPath, data, autoDiscoveryConfigFilePerm); err != nil {
-		return fmt.Errorf("failed to write auto-discovery config: %v", err)
+		return fmt.Errorf("failed to write auto-discovery config: %w", err)
 	}
 	if err := enforceAutoDiscoveryConfigPermissions(configPath); err != nil {
-		return fmt.Errorf("failed to secure auto-discovery config: %v", err)
+		return fmt.Errorf("failed to secure auto-discovery config: %w", err)
 	}
 
 	log.Printf("Auto-discovery config saved to: %s", configPath)
