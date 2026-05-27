@@ -133,6 +133,47 @@ redact_komari_args() {
     printf '%s' "$redacted_args"
 }
 
+sha256_file() {
+    local file_path="$1"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file_path" | awk '{print $1}'
+        return
+    fi
+
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file_path" | awk '{print $1}'
+        return
+    fi
+
+    if command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$file_path"
+        return
+    fi
+
+    if command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 -r "$file_path" | awk '{print $1}'
+        return
+    fi
+
+    return 1
+}
+
+verify_release_checksum() {
+    local file_path="$1"
+    local checksum_path="$2"
+    local expected_checksum
+    local actual_checksum
+
+    expected_checksum="$(awk '{print $1}' "$checksum_path" | tr -d '\r')"
+    if [ -z "$expected_checksum" ]; then
+        return 1
+    fi
+
+    actual_checksum="$(sha256_file "$file_path")" || return 1
+    [ "$actual_checksum" = "$expected_checksum" ]
+}
+
 # Default values
 service_name="komari-agent"
 target_dir="/opt/komari"
@@ -326,10 +367,8 @@ uninstall_previous() {
         fi
     fi
     
-    # Remove old binary if it exists
     if [ -f "$komari_agent_path" ]; then
-        log_info "Removing old binary..."
-        rm -f "$komari_agent_path"
+        log_info "Existing binary will be replaced after checksum verification."
     fi
 
     if [ -f "$komari_config_file" ]; then
@@ -460,6 +499,10 @@ else
     download_url="https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
 fi
 
+checksum_url="${download_url}.sha256"
+download_tmp_path="${komari_agent_path}.download.$$"
+checksum_tmp_path="${download_tmp_path}.sha256"
+
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
 
@@ -471,13 +514,41 @@ else
     log_step "Downloading $file_name directly..."
     log_info "URL: ${CYAN}$(redact_url_for_log "$download_url")${NC}"
 fi
-if ! curl -L -o "$komari_agent_path" "$download_url"; then
+if ! curl -fL -o "$download_tmp_path" "$download_url"; then
+    rm -f "$download_tmp_path" "$checksum_tmp_path"
     log_error "Download failed"
     exit 1
 fi
 
-# Set executable permissions
-chmod +x "$komari_agent_path"
+log_step "Downloading SHA256 checksum for $file_name..."
+log_info "URL: ${CYAN}$(redact_url_for_log "$checksum_url")${NC}"
+if ! curl -fL -o "$checksum_tmp_path" "$checksum_url"; then
+    rm -f "$download_tmp_path" "$checksum_tmp_path"
+    log_error "Checksum download failed"
+    exit 1
+fi
+
+log_step "Verifying SHA256 checksum..."
+if ! verify_release_checksum "$download_tmp_path" "$checksum_tmp_path"; then
+    rm -f "$download_tmp_path" "$checksum_tmp_path"
+    log_error "Checksum verification failed"
+    exit 1
+fi
+
+# Set executable permissions and replace the target only after verification succeeds
+if ! chmod +x "$download_tmp_path"; then
+    rm -f "$download_tmp_path" "$checksum_tmp_path"
+    log_error "Failed to set executable permissions on the downloaded binary"
+    exit 1
+fi
+
+if ! mv -f "$download_tmp_path" "$komari_agent_path"; then
+    rm -f "$download_tmp_path" "$checksum_tmp_path"
+    log_error "Failed to replace the installed binary"
+    exit 1
+fi
+
+rm -f "$checksum_tmp_path"
 log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
 if [ -n "$komari_token" ]; then
