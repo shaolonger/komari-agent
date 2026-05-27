@@ -9,15 +9,20 @@ import (
 	"testing"
 
 	"github.com/blang/semver"
+	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/rhysd/go-github-selfupdate/selfupdate"
 )
 
 type stubSelfUpdater struct {
 	release *selfupdate.Release
 	err     error
+	update  func(current semver.Version, slug string) (*selfupdate.Release, error)
 }
 
 func (s stubSelfUpdater) UpdateSelf(current semver.Version, slug string) (*selfupdate.Release, error) {
+	if s.update != nil {
+		return s.update(current, slug)
+	}
 	return s.release, s.err
 }
 
@@ -225,5 +230,48 @@ func TestCheckAndUpdateExitsAfterSuccessfulUpdate(t *testing.T) {
 	}
 	if exitCode != 42 {
 		t.Fatalf("exitProcess() code = %d, want %d", exitCode, 42)
+	}
+}
+
+func TestCheckAndUpdateUsesVerifiedHTTPClientWhenUnsafeCertsEnabled(t *testing.T) {
+	exitCode := 0
+	useUpdateHooks(t, stubSelfUpdater{}, nil, &exitCode)
+
+	previousIgnoreUnsafeCert := flags_pkg.GlobalConfig.IgnoreUnsafeCert
+	flags_pkg.GlobalConfig.IgnoreUnsafeCert = true
+	t.Cleanup(func() {
+		flags_pkg.GlobalConfig.IgnoreUnsafeCert = previousIgnoreUnsafeCert
+	})
+
+	previousDefaultClient := http.DefaultClient
+	observedSkipVerify := true
+
+	newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
+		return stubSelfUpdater{
+			update: func(current semver.Version, slug string) (*selfupdate.Release, error) {
+				transport, ok := http.DefaultClient.Transport.(*http.Transport)
+				if !ok {
+					t.Fatalf("http.DefaultClient.Transport = %T, want *http.Transport", http.DefaultClient.Transport)
+				}
+				if transport.TLSClientConfig == nil {
+					t.Fatal("http.DefaultClient.Transport.TLSClientConfig = nil, want non-nil")
+				}
+				observedSkipVerify = transport.TLSClientConfig.InsecureSkipVerify
+				return &selfupdate.Release{Version: current}, nil
+			},
+		}, nil
+	}
+
+	if err := CheckAndUpdate(); err != nil {
+		t.Fatalf("CheckAndUpdate() error = %v", err)
+	}
+	if observedSkipVerify {
+		t.Fatal("http.DefaultClient used by auto-update had InsecureSkipVerify=true, want false")
+	}
+	if http.DefaultClient != previousDefaultClient {
+		t.Fatal("http.DefaultClient was not restored after auto-update check")
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
 	}
 }

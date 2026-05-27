@@ -74,7 +74,12 @@ func CheckAndUpdate() error {
 		return failUpdate(updateStageVersionParse)
 	}
 
-	http.DefaultClient = dnsresolver.GetHTTPClient(60 * time.Second)
+	previousDefaultClient := http.DefaultClient
+	http.DefaultClient = dnsresolver.GetVerifiedHTTPClient(60 * time.Second)
+	defer func() {
+		http.DefaultClient = previousDefaultClient
+	}()
+
 	config := selfUpdateConfig()
 	updater, err := newSelfUpdater(config)
 	if err != nil {

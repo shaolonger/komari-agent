@@ -167,13 +167,22 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 	}
 }
 
-func GetHTTPClient(timeout time.Duration) *http.Client {
+func newHTTPClient(timeout time.Duration, insecureSkipVerify bool) *http.Client {
 	return &http.Client{
 		Transport: buildTransport(timeout, &tls.Config{
-			InsecureSkipVerify: flags.IgnoreUnsafeCert,
+			InsecureSkipVerify: insecureSkipVerify,
 		}),
 		Timeout: timeout,
 	}
+}
+
+func GetHTTPClient(timeout time.Duration) *http.Client {
+	return newHTTPClient(timeout, flags.IgnoreUnsafeCert)
+}
+
+// GetVerifiedHTTPClient returns an HTTP client that always validates TLS certificates.
+func GetVerifiedHTTPClient(timeout time.Duration) *http.Client {
+	return newHTTPClient(timeout, false)
 }
 
 // GetNetDialer 返回一个使用自定义DNS解析器的网络拨号器
