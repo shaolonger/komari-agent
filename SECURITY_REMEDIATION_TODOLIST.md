@@ -142,7 +142,7 @@ Date: 2026-05-26
 
 ### 3.2 更新逻辑整改
 
-- [ ] 在 `update/update.go` 中显式启用 `go-github-selfupdate` 的校验器。
+- [x] 在 `update/update.go` 中显式启用 `go-github-selfupdate` 的校验器。
 - [ ] 校验失败时必须终止更新，不允许回退为“仅凭 TLS 信任继续执行”。
 - [ ] 为更新失败增加明确日志，但日志中不应泄漏敏感上下文。
 - [ ] 检查更新链路是否受 `--ignore-unsafe-cert` 影响，必要时彻底解耦。

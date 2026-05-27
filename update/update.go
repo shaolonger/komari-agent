@@ -38,6 +38,12 @@ func DoUpdateWorks() {
 	}
 }
 
+func selfUpdateConfig() selfupdate.Config {
+	return selfupdate.Config{
+		Validator: &selfupdate.SHA2Validator{},
+	}
+}
+
 // 检查更新并执行自动更新
 func CheckAndUpdate() error {
 	log.Println("Checking update...")
@@ -48,7 +54,7 @@ func CheckAndUpdate() error {
 	}
 
 	http.DefaultClient = dnsresolver.GetHTTPClient(60 * time.Second)
-	config := selfupdate.Config{}
+	config := selfUpdateConfig()
 	updater, err := selfupdate.NewUpdater(config)
 	if err != nil {
 		return fmt.Errorf("failed to create updater: %v", err)

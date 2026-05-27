@@ -3,6 +3,8 @@ package update
 import (
 	"strings"
 	"testing"
+
+	"github.com/rhysd/go-github-selfupdate/selfupdate"
 )
 
 // TestParseVersion 验证 parseVersion 能够解析各种版本号格式，包括带 v/V 前缀、预发布和构建元数据
@@ -68,5 +70,17 @@ func TestNeedUpdate(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("needUpdate(%q, %q) = %v, want %v", tt.current, tt.latest, got, tt.want)
 		}
+	}
+}
+
+func TestSelfUpdateConfigUsesSHA2Validator(t *testing.T) {
+	config := selfUpdateConfig()
+
+	validator, ok := config.Validator.(*selfupdate.SHA2Validator)
+	if !ok || validator == nil {
+		t.Fatalf("config.Validator = %T, want *selfupdate.SHA2Validator", config.Validator)
+	}
+	if got := validator.Suffix(); got != ".sha256" {
+		t.Fatalf("validator.Suffix() = %q, want %q", got, ".sha256")
 	}
 }
