@@ -4,10 +4,46 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Assert-PowerShellScriptParses {
+    param([string]$Path)
+
+    $tokens = $null
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors) | Out-Null
+    if ($errors -and $errors.Count -gt 0) {
+        throw ($errors | ForEach-Object { "${Path}: $($_.Message)" } | Out-String)
+    }
+}
+
+function Assert-BashScriptParses {
+    param(
+        [string]$Path,
+        [string]$BashExecutable
+    )
+
+    $content = Get-Content -Raw -Path $Path
+    $normalizedContent = $content -replace "`r`n", "`n"
+    $normalizedContent | & $BashExecutable -n
+    if ($LASTEXITCODE -ne 0) {
+        throw "bash -n failed for $Path"
+    }
+}
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 Push-Location $repoRoot
 
 try {
+    $bashCommand = Get-Command bash -ErrorAction SilentlyContinue
+    if (-not $bashCommand) {
+        throw 'bash is required to run shell-based supply-chain validation'
+    }
+
+    Assert-PowerShellScriptParses (Join-Path $repoRoot 'install.ps1')
+    Assert-PowerShellScriptParses (Join-Path $PSScriptRoot 'verify-install-ps1-integrity.ps1')
+    Assert-PowerShellScriptParses (Join-Path $PSScriptRoot 'verify-supply-chain-stage.ps1')
+    Assert-BashScriptParses -Path (Join-Path $repoRoot 'install.sh') -BashExecutable $bashCommand.Source
+    Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'verify-install-sh-integrity.sh') -BashExecutable $bashCommand.Source
+
     if (-not $SkipLiveReleaseCheck) {
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/komari-monitor/komari-agent/releases/latest' -UseBasicParsing
         $assetNames = @($release.assets | Select-Object -ExpandProperty name)
@@ -29,11 +65,6 @@ try {
     & (Join-Path $PSScriptRoot 'verify-install-ps1-integrity.ps1')
     if ($LASTEXITCODE -ne 0) {
         throw 'verify-install-ps1-integrity.ps1 failed'
-    }
-
-    $bashCommand = Get-Command bash -ErrorAction SilentlyContinue
-    if (-not $bashCommand) {
-        throw 'bash is required to run scripts/verify-install-sh-integrity.sh'
     }
 
     & $bashCommand.Source './scripts/verify-install-sh-integrity.sh'
