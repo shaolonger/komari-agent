@@ -161,6 +161,47 @@ function Write-KomariConfigFile {
     }
 }
 
+function Get-KomariFileHash {
+    param(
+        [string]$Path,
+        [ValidateSet('SHA1', 'SHA256')]
+        [string]$Algorithm
+    )
+
+    return (Get-FileHash -Path $Path -Algorithm $Algorithm).Hash.ToLowerInvariant()
+}
+
+function Get-KomariChecksumValue {
+    param([string]$Path)
+
+    $line = Get-Content -Path $Path -TotalCount 1
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        throw "Checksum file is empty: $Path"
+    }
+
+    $value = ($line -split '\s+')[0].Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw "Checksum file does not contain a usable hash: $Path"
+    }
+
+    return $value
+}
+
+function Assert-KomariFileHash {
+    param(
+        [string]$Path,
+        [ValidateSet('SHA1', 'SHA256')]
+        [string]$Algorithm,
+        [string]$ExpectedHash,
+        [string]$Label
+    )
+
+    $actualHash = Get-KomariFileHash -Path $Path -Algorithm $Algorithm
+    if ($actualHash -ne $ExpectedHash.ToLowerInvariant()) {
+        throw "$Label hash verification failed"
+    }
+}
+
 # Default parameters
 $InstallDir = Join-Path $Env:ProgramFiles "Komari"
 $ServiceName = "komari-agent"
@@ -255,6 +296,7 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 # Ensure installation directory exists for nssm and agent
 Log-Step "Ensuring installation directory exists: $InstallDir"
 New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null # Ensure $InstallDir exists
+$NssmReleaseSha1 = 'be7b3577c6e3a280e5106a9e9db5b3775931cefc'
 
 # Check for nssm and download if not present
 $nssmExeToUse = Join-Path $InstallDir "nssm.exe"
@@ -299,12 +341,15 @@ if (-not $nssmCmd) {
     Log-Info "nssm not found or not usable. Attempting to download to $InstallDir..."
     $NssmVersion = "2.24"
     $NssmZipUrl = "https://nssm.cc/release/nssm-$NssmVersion.zip"
-    $TempNssmZipPath = Join-Path $env:TEMP "nssm-$NssmVersion.zip"
-    $TempExtractDir = Join-Path $env:TEMP "nssm_extract_temp"
+    $TempNssmZipPath = Join-Path $env:TEMP "nssm-$NssmVersion-$PID.zip"
+    $TempExtractDir = Join-Path $env:TEMP "nssm_extract_temp_$PID"
 
     try {
         Log-Info "Downloading nssm from $NssmZipUrl..."
         Invoke-WebRequest -Uri $NssmZipUrl -OutFile $TempNssmZipPath -UseBasicParsing
+
+        Log-Step "Verifying nssm archive hash..."
+        Assert-KomariFileHash -Path $TempNssmZipPath -Algorithm SHA1 -ExpectedHash $NssmReleaseSha1 -Label "nssm-$NssmVersion.zip"
 
         if (Test-Path $TempExtractDir) { Remove-Item -Recurse -Force $TempExtractDir }
         New-Item -ItemType Directory -Path $TempExtractDir -Force | Out-Null
@@ -411,8 +456,7 @@ function Uninstall-Previous {
     }
 
     if (Test-Path $AgentPath) {
-        Log-Warning "Removing old binary..."
-        Remove-Item $AgentPath -Force
+        Log-Warning "Existing binary will be replaced after checksum verification."
     }
 
     if (Test-Path $ConfigFile) {
@@ -450,16 +494,32 @@ Log-Success "Installing Komari Agent version: $versionToInstall"
 # Construct download URL
 $BinaryName = "komari-agent-windows-$arch.exe"
 $DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/komari-monitor/komari-agent/releases/download/$versionToInstall/$BinaryName" } else { "https://github.com/komari-monitor/komari-agent/releases/download/$versionToInstall/$BinaryName" }
+$ChecksumUrl = "$DownloadUrl.sha256"
+$AgentDownloadTempPath = Join-Path $InstallDir "komari-agent.exe.download.$PID"
+$AgentChecksumTempPath = "$AgentDownloadTempPath.sha256"
 
 # Download and install
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Log-Info "URL: $(Format-KomariUrlForLog -Value $DownloadUrl)"
 try {
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $AgentPath -UseBasicParsing
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $AgentDownloadTempPath -UseBasicParsing
+
+    Log-Info "Checksum URL: $(Format-KomariUrlForLog -Value $ChecksumUrl)"
+    Invoke-WebRequest -Uri $ChecksumUrl -OutFile $AgentChecksumTempPath -UseBasicParsing
+
+    Log-Step "Verifying agent SHA256 checksum..."
+    $expectedAgentHash = Get-KomariChecksumValue -Path $AgentChecksumTempPath
+    Assert-KomariFileHash -Path $AgentDownloadTempPath -Algorithm SHA256 -ExpectedHash $expectedAgentHash -Label $BinaryName
+
+    Move-Item -Path $AgentDownloadTempPath -Destination $AgentPath -Force
 }
 catch {
-    Log-Error "Download failed: $_"
+    Log-Error "Download or verification failed: $_"
     exit 1
+}
+finally {
+    if (Test-Path $AgentDownloadTempPath) { Remove-Item $AgentDownloadTempPath -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $AgentChecksumTempPath) { Remove-Item $AgentChecksumTempPath -Force -ErrorAction SilentlyContinue }
 }
 Log-Success "Downloaded and saved to $AgentPath"
 
