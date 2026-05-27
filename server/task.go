@@ -15,9 +15,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/komari-monitor/komari-agent/ws"
 	ping "github.com/prometheus-community/pro-bing"
 )
+
+type pingResultWriter interface {
+	WriteJSON(v interface{}) error
+}
 
 const defaultTaskExecutionTimeout = 5 * time.Minute
 const defaultTaskOutputLimit = 128 * 1024
@@ -62,8 +65,8 @@ func NewTask(task_id, command string) {
 		taskResultUploader(task_id, "No command provided", 0, time.Now())
 		return
 	}
-	if !flags.RemoteControlEnabled() {
-		taskResultUploader(task_id, "Remote control is disabled.", -1, time.Now())
+	if !flags.RemoteExecEnabled() {
+		taskResultUploader(task_id, "Remote task execution is disabled.", -1, time.Now())
 		return
 	}
 	releaseTaskSlot := acquireTaskExecutionSlot()
@@ -368,9 +371,14 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	return latency, errors.New("http status not ok")
 }
 
-func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
+func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string) {
 	if taskID == 0 {
 		log.Printf("Invalid task ID: %d", taskID)
+		return
+	}
+	if !flags.PingEnabled() {
+		log.Printf("Ping task %d rejected: ping capability is disabled", taskID)
+		writePingResult(conn, taskID, pingType, -1)
 		return
 	}
 	var err error = nil
@@ -426,6 +434,10 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	} else {
 		pingResult = int(latency)
 	}
+	writePingResult(conn, taskID, pingType, pingResult)
+}
+
+func writePingResult(conn pingResultWriter, taskID uint, pingType string, pingResult int) {
 	payload := map[string]interface{}{
 		"type":        "ping_result",
 		"task_id":     taskID,
@@ -441,5 +453,4 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	if err := conn.WriteJSON(payload); err != nil {
 		log.Printf("Failed to write JSON to WebSocket: %v", err)
 	}
-
 }

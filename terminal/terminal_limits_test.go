@@ -90,3 +90,19 @@ func TestTerminalSessionDurationsRespectConfiguredValues(t *testing.T) {
 		t.Fatalf("terminalMaxDuration() = %s, want %s", got, 120*time.Second)
 	}
 }
+
+func TestTerminalCapabilityCanBeEnabledIndividually(t *testing.T) {
+	useTerminalFlagsSnapshot(t)
+
+	flags.DisableWebSsh = true
+	flags.EnableRemoteControl = false
+	flags.EnableTerminal = false
+	if terminalCapabilityEnabled() {
+		t.Fatal("expected terminal capability to be disabled without explicit opt-in")
+	}
+
+	flags.EnableTerminal = true
+	if !terminalCapabilityEnabled() {
+		t.Fatal("expected terminal capability to be enabled by its dedicated flag")
+	}
+}

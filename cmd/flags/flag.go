@@ -5,6 +5,9 @@ type Config struct {
 	DisableAutoUpdate    bool    `json:"disable_auto_update" env:"AGENT_DISABLE_AUTO_UPDATE"`         // 禁用自动更新
 	DisableWebSsh        bool    `json:"disable_web_ssh" env:"AGENT_DISABLE_WEB_SSH"`                 // 兼容旧配置的远程控制禁用开关；默认禁用远程控制
 	EnableRemoteControl  bool    `json:"enable_remote_control" env:"AGENT_ENABLE_REMOTE_CONTROL"`     // 显式启用远程控制（web ssh 和 rce）
+	EnableRemoteExec     bool    `json:"enable_remote_exec" env:"AGENT_ENABLE_REMOTE_EXEC"`           // 显式启用远程命令执行
+	EnableTerminal       bool    `json:"enable_terminal" env:"AGENT_ENABLE_TERMINAL"`                 // 显式启用远程终端
+	EnablePing           bool    `json:"enable_ping" env:"AGENT_ENABLE_PING"`                         // 显式启用远程 ping 探测
 	AuditTaskCommands    bool    `json:"audit_task_commands" env:"AGENT_AUDIT_TASK_COMMANDS"`         // 显式开启任务命令审计日志
 	MaxTerminalSessions  int     `json:"max_terminal_sessions" env:"AGENT_MAX_TERMINAL_SESSIONS"`     // 单机允许的最大终端会话数
 	TerminalIdleTimeout  int     `json:"terminal_idle_timeout" env:"AGENT_TERMINAL_IDLE_TIMEOUT"`     // 终端空闲超时，单位秒
@@ -39,6 +42,18 @@ type Config struct {
 
 func (config *Config) RemoteControlEnabled() bool {
 	return config.EnableRemoteControl || !config.DisableWebSsh
+}
+
+func (config *Config) RemoteExecEnabled() bool {
+	return config.EnableRemoteExec || config.RemoteControlEnabled()
+}
+
+func (config *Config) TerminalEnabled() bool {
+	return config.EnableTerminal || config.RemoteControlEnabled()
+}
+
+func (config *Config) PingEnabled() bool {
+	return config.EnablePing || config.RemoteControlEnabled()
 }
 
 var GlobalConfig = &Config{

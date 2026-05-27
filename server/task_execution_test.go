@@ -20,7 +20,7 @@ type capturedTaskResult struct {
 func TestNewTaskReturnsCommandOutput(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 2*time.Second)
-	setRemoteControlEnabled(t, true)
+	setRemoteExecEnabled(t, true)
 
 	NewTask("task-output", successTaskCommand())
 
@@ -41,7 +41,7 @@ func TestNewTaskReturnsCommandOutput(t *testing.T) {
 func TestNewTaskTimesOutLongRunningCommand(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 150*time.Millisecond)
-	setRemoteControlEnabled(t, true)
+	setRemoteExecEnabled(t, true)
 
 	startedAt := time.Now()
 	NewTask("task-timeout", slowTaskCommand())
@@ -68,7 +68,7 @@ func TestNewTaskTruncatesLargeOutput(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 2*time.Second)
 	setTaskOutputLimit(t, 32)
-	setRemoteControlEnabled(t, true)
+	setRemoteExecEnabled(t, true)
 
 	NewTask("task-large-output", largeOutputTaskCommand(64))
 
@@ -92,7 +92,7 @@ func TestNewTaskTruncatesLargeOutput(t *testing.T) {
 func TestNewTaskLogsDoNotExposeCommandText(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 2*time.Second)
-	setRemoteControlEnabled(t, true)
+	setRemoteExecEnabled(t, true)
 
 	logBuffer, restoreLogger := captureTaskLogs(t)
 	defer restoreLogger()
@@ -121,7 +121,7 @@ func TestNewTaskLogsDoNotExposeCommandText(t *testing.T) {
 func TestNewTaskAuditLoggingRedactsSensitiveCommandText(t *testing.T) {
 	result := captureTaskResult(t)
 	setTaskExecutionTimeout(t, 2*time.Second)
-	setRemoteControlEnabled(t, true)
+	setRemoteExecEnabled(t, true)
 	setTaskCommandAudit(t, true)
 
 	logBuffer, restoreLogger := captureTaskLogs(t)
@@ -155,7 +155,7 @@ func TestNewTaskQueuesWhenConcurrencyLimitReached(t *testing.T) {
 	results := captureTaskResults(t, 2)
 	setTaskExecutionTimeout(t, 2*time.Second)
 	setTaskConcurrencyLimit(t, 1)
-	setRemoteControlEnabled(t, true)
+	setRemoteExecEnabled(t, true)
 
 	logBuffer, restoreLogger := captureTaskLogs(t)
 	defer restoreLogger()
@@ -212,16 +212,19 @@ func setTaskExecutionTimeout(t *testing.T, timeout time.Duration) {
 	})
 }
 
-func setRemoteControlEnabled(t *testing.T, enabled bool) {
+func setRemoteExecEnabled(t *testing.T, enabled bool) {
 	t.Helper()
 
 	originalDisable := flags.DisableWebSsh
 	originalEnable := flags.EnableRemoteControl
-	flags.DisableWebSsh = !enabled
-	flags.EnableRemoteControl = enabled
+	originalExec := flags.EnableRemoteExec
+	flags.DisableWebSsh = true
+	flags.EnableRemoteControl = false
+	flags.EnableRemoteExec = enabled
 	t.Cleanup(func() {
 		flags.DisableWebSsh = originalDisable
 		flags.EnableRemoteControl = originalEnable
+		flags.EnableRemoteExec = originalExec
 	})
 }
 

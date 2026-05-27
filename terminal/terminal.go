@@ -39,8 +39,8 @@ type terminalImpl struct {
 
 // StartTerminal 启动终端并处理 WebSocket 通信
 func StartTerminal(conn *websocket.Conn) {
-	if !flags.RemoteControlEnabled() {
-		conn.WriteMessage(websocket.TextMessage, []byte("\n\nWeb SSH is disabled. Enable it explicitly with --enable-remote-control if required."))
+	if !terminalCapabilityEnabled() {
+		conn.WriteMessage(websocket.TextMessage, []byte("\n\nTerminal access is disabled. Enable it explicitly with --enable-terminal or --enable-remote-control if required."))
 		conn.Close()
 		return
 	}
@@ -100,6 +100,10 @@ func StartTerminal(conn *websocket.Conn) {
 			return
 		}
 	}
+}
+
+func terminalCapabilityEnabled() bool {
+	return flags.TerminalEnabled()
 }
 
 func terminalSessionLimit() int {
