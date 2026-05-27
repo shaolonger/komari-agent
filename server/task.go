@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari-agent/ws"
@@ -17,9 +19,17 @@ import (
 )
 
 const defaultTaskExecutionTimeout = 5 * time.Minute
+const defaultTaskOutputLimit = 128 * 1024
+const defaultTaskConcurrencyLimit = 1
 
 var taskExecutionTimeout = defaultTaskExecutionTimeout
+var taskOutputLimit = defaultTaskOutputLimit
+var taskConcurrencyLimit = defaultTaskConcurrencyLimit
 var taskResultUploader = uploadTaskResult
+
+var taskExecutionSlotsMu sync.Mutex
+var taskExecutionSlots chan struct{}
+var taskExecutionSlotsLimit int
 
 func NewTask(task_id, command string) {
 	if task_id == "" {
@@ -33,29 +43,56 @@ func NewTask(task_id, command string) {
 		taskResultUploader(task_id, "Remote control is disabled.", -1, time.Now())
 		return
 	}
-	log.Printf("Executing task %s with command: %s", task_id, command)
-	result, exitCode, finishedAt := executeTaskCommand(command)
+	releaseTaskSlot := acquireTaskExecutionSlot()
+	defer releaseTaskSlot()
+
+	startedAt := time.Now()
+	log.Printf("Task started task_id=%s started_at=%s", task_id, startedAt.UTC().Format(time.RFC3339))
+	result, exitCode, outputBytes, finishedAt := executeTaskCommand(command)
+	log.Printf("Task finished task_id=%s finished_at=%s exit_code=%d output_bytes=%d", task_id, finishedAt.UTC().Format(time.RFC3339), exitCode, outputBytes)
 	taskResultUploader(task_id, result, exitCode, finishedAt)
 }
 
-func executeTaskCommand(command string) (string, int, time.Time) {
+func acquireTaskExecutionSlot() func() {
+	limit := taskConcurrencyLimit
+	if limit < 1 {
+		limit = 1
+	}
+
+	taskExecutionSlotsMu.Lock()
+	if taskExecutionSlots == nil || taskExecutionSlotsLimit != limit {
+		taskExecutionSlots = make(chan struct{}, limit)
+		taskExecutionSlotsLimit = limit
+	}
+	slots := taskExecutionSlots
+	taskExecutionSlotsMu.Unlock()
+
+	slots <- struct{}{}
+	return func() {
+		<-slots
+	}
+}
+
+func executeTaskCommand(command string) (string, int, int, time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), taskExecutionTimeout)
 	defer cancel()
 
 	cmd := newTaskCommand(ctx, command)
-	var stdout, stderr bytes.Buffer
+	stdout := newTaskOutputBuffer(taskOutputLimit)
+	stderr := newTaskOutputBuffer(taskOutputLimit)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
 	finishedAt := time.Now()
+	outputBytes := stdout.TotalBytes() + stderr.TotalBytes()
 
-	result := collectTaskOutput(stdout.String(), stderr.String())
+	result := collectTaskOutput(stdout, stderr)
 	result = strings.ReplaceAll(result, "\r\n", "\n")
 
 	exitCode := 0
 	if err == nil {
-		return result, exitCode, finishedAt
+		return result, exitCode, outputBytes, finishedAt
 	}
 
 	var exitError *exec.ExitError
@@ -73,15 +110,64 @@ func executeTaskCommand(command string) (string, int, time.Time) {
 		result = appendTaskOutput(result, err.Error())
 	}
 
-	return result, exitCode, finishedAt
+	return result, exitCode, outputBytes, finishedAt
 }
 
-func collectTaskOutput(stdout, stderr string) string {
-	result := stdout
-	if stderr != "" {
-		result = appendTaskOutput(result, stderr)
+func collectTaskOutput(stdout, stderr taskOutputBuffer) string {
+	result := stdout.String()
+	if stderr.String() != "" {
+		result = appendTaskOutput(result, stderr.String())
+	}
+	if stdout.Truncated() || stderr.Truncated() {
+		result = appendTaskOutput(result, fmt.Sprintf("Task output truncated after %d bytes per stream.", taskOutputLimit))
 	}
 	return result
+}
+
+type taskOutputBuffer struct {
+	buffer    bytes.Buffer
+	limit     int
+	totalBytes int
+	truncated bool
+}
+
+func newTaskOutputBuffer(limit int) taskOutputBuffer {
+	if limit < 0 {
+		limit = 0
+	}
+	return taskOutputBuffer{limit: limit}
+}
+
+func (buffer *taskOutputBuffer) Write(data []byte) (int, error) {
+	buffer.totalBytes += len(data)
+	remaining := buffer.limit - buffer.buffer.Len()
+	if remaining <= 0 {
+		if len(data) > 0 {
+			buffer.truncated = true
+		}
+		return len(data), nil
+	}
+
+	if len(data) > remaining {
+		_, _ = buffer.buffer.Write(data[:remaining])
+		buffer.truncated = true
+		return len(data), nil
+	}
+
+	_, _ = buffer.buffer.Write(data)
+	return len(data), nil
+}
+
+func (buffer *taskOutputBuffer) String() string {
+	return buffer.buffer.String()
+}
+
+func (buffer *taskOutputBuffer) TotalBytes() int {
+	return buffer.totalBytes
+}
+
+func (buffer *taskOutputBuffer) Truncated() bool {
+	return buffer.truncated
 }
 
 func appendTaskOutput(result, addition string) string {
