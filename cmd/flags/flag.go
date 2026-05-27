@@ -48,19 +48,35 @@ type Config struct {
 }
 
 func (config *Config) RemoteControlEnabled() bool {
+	if config.IgnoreUnsafeCert {
+		return false
+	}
 	return config.EnableRemoteControl || !config.DisableWebSsh
 }
 
 func (config *Config) RemoteExecEnabled() bool {
+	if config.IgnoreUnsafeCert {
+		return false
+	}
 	return config.EnableRemoteExec || config.RemoteControlEnabled()
 }
 
 func (config *Config) TerminalEnabled() bool {
+	if config.IgnoreUnsafeCert {
+		return false
+	}
 	return config.EnableTerminal || config.RemoteControlEnabled()
 }
 
 func (config *Config) PingEnabled() bool {
+	if config.IgnoreUnsafeCert {
+		return false
+	}
 	return config.EnablePing || config.RemoteControlEnabled()
+}
+
+func (config *Config) AutoUpdateEnabled() bool {
+	return !config.DisableAutoUpdate && !config.IgnoreUnsafeCert
 }
 
 var GlobalConfig = &Config{

@@ -114,15 +114,18 @@ var RootCmd = &cobra.Command{
 
 		// 忽略不安全的证书
 		if flags.IgnoreUnsafeCert {
+			log.Println("WARNING: --ignore-unsafe-cert disables remote control capabilities and automatic updates.")
 			http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		}
 		// 自动更新
-		if !flags.DisableAutoUpdate {
+		if flags.AutoUpdateEnabled() {
 			err := update.CheckAndUpdate()
 			if err != nil {
 				log.Println("[ERROR]", err)
 			}
 			go update.DoUpdateWorks()
+		} else if flags.IgnoreUnsafeCert && !flags.DisableAutoUpdate {
+			log.Println("Automatic updates are disabled while --ignore-unsafe-cert is enabled.")
 		}
 		go server.DoUploadBasicInfoWorks()
 		for {

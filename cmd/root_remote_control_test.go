@@ -70,3 +70,31 @@ func TestRemoteCapabilitiesCanBeEnabledIndividually(t *testing.T) {
 		t.Fatal("expected broad remote control opt-in to enable all remote capabilities")
 	}
 }
+
+func TestIgnoreUnsafeCertDisablesRemoteCapabilitiesAndAutoUpdate(t *testing.T) {
+	useGlobalFlagsSnapshot(t)
+
+	flags.DisableWebSsh = false
+	flags.EnableRemoteControl = true
+	flags.EnableRemoteExec = true
+	flags.EnableTerminal = true
+	flags.EnablePing = true
+	flags.DisableAutoUpdate = false
+	flags.IgnoreUnsafeCert = true
+
+	if flags.RemoteControlEnabled() {
+		t.Fatal("RemoteControlEnabled() = true, want false when ignore-unsafe-cert is enabled")
+	}
+	if flags.RemoteExecEnabled() {
+		t.Fatal("RemoteExecEnabled() = true, want false when ignore-unsafe-cert is enabled")
+	}
+	if flags.TerminalEnabled() {
+		t.Fatal("TerminalEnabled() = true, want false when ignore-unsafe-cert is enabled")
+	}
+	if flags.PingEnabled() {
+		t.Fatal("PingEnabled() = true, want false when ignore-unsafe-cert is enabled")
+	}
+	if flags.AutoUpdateEnabled() {
+		t.Fatal("AutoUpdateEnabled() = true, want false when ignore-unsafe-cert is enabled")
+	}
+}
