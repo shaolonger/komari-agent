@@ -9,6 +9,19 @@ import (
 	"testing"
 )
 
+func useAutoDiscoveryExpectedOwnerUID(t *testing.T, ownerUID uint32) {
+	t.Helper()
+
+	previous := autoDiscoveryExpectedOwnerUID
+	autoDiscoveryExpectedOwnerUID = func() (uint32, error) {
+		return ownerUID, nil
+	}
+
+	t.Cleanup(func() {
+		autoDiscoveryExpectedOwnerUID = previous
+	})
+}
+
 func TestSaveAutoDiscoveryConfigTightensExistingPermissions(t *testing.T) {
 	baseDir := t.TempDir()
 	configPath := filepath.Join(baseDir, "config", autoDiscoveryConfigDirName, autoDiscoveryConfigFileName)
@@ -61,5 +74,29 @@ func TestLoadAutoDiscoveryConfigRejectsPermissiveFileMode(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "too permissive") {
 		t.Fatalf("loadAutoDiscoveryConfig() error = %v, want permission check failure", err)
+	}
+}
+
+func TestLoadAutoDiscoveryConfigRejectsUnexpectedOwner(t *testing.T) {
+	baseDir := t.TempDir()
+	configPath := filepath.Join(baseDir, "config", autoDiscoveryConfigDirName, autoDiscoveryConfigFileName)
+	legacyPath := filepath.Join(baseDir, "legacy", autoDiscoveryConfigFileName)
+	useAutoDiscoveryPaths(t, configPath, legacyPath)
+	if err := saveAutoDiscoveryConfig(&AutoDiscoveryConfig{UUID: "test-uuid", Token: "test-token"}); err != nil {
+		t.Fatalf("saveAutoDiscoveryConfig() error = %v", err)
+	}
+
+	actualOwnerUID, err := autoDiscoveryPathOwnerUID(configPath)
+	if err != nil {
+		t.Fatalf("autoDiscoveryPathOwnerUID() error = %v", err)
+	}
+	useAutoDiscoveryExpectedOwnerUID(t, actualOwnerUID+1)
+
+	_, err = loadAutoDiscoveryConfig()
+	if err == nil {
+		t.Fatal("loadAutoDiscoveryConfig() error = nil, want owner validation failure")
+	}
+	if !strings.Contains(err.Error(), "does not match expected uid") {
+		t.Fatalf("loadAutoDiscoveryConfig() error = %v, want owner validation failure", err)
 	}
 }

@@ -4,15 +4,63 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/windows"
 )
 
 const (
-	autoDiscoveryAdministratorsSID = "BA"
-	autoDiscoveryLocalSystemSID    = "SY"
+	autoDiscoveryAdministratorsSID       = "BA"
+	autoDiscoveryLocalSystemSID          = "SY"
+	autoDiscoveryAdministratorsSIDString = "S-1-5-32-544"
+	autoDiscoveryLocalSystemSIDString    = "S-1-5-18"
 )
+
+var autoDiscoveryExpectedOwnerSIDs = currentAutoDiscoveryOwnerSIDs
+
+func currentAutoDiscoveryOwnerSID() (string, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return "", fmt.Errorf("open current process token: %w", err)
+	}
+	defer token.Close()
+
+	tokenUser, err := token.GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("get token user: %w", err)
+	}
+	if tokenUser.User.Sid == nil || !tokenUser.User.Sid.IsValid() {
+		return "", fmt.Errorf("get token user: invalid sid")
+	}
+
+	return tokenUser.User.Sid.String(), nil
+}
+
+func currentAutoDiscoveryOwnerSIDs() ([]string, error) {
+	currentOwnerSID, err := currentAutoDiscoveryOwnerSID()
+	if err != nil {
+		return nil, err
+	}
+
+	return []string{currentOwnerSID, autoDiscoveryAdministratorsSIDString, autoDiscoveryLocalSystemSIDString}, nil
+}
+
+func autoDiscoveryPathOwnerSID(path string) (*windows.SID, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, fmt.Errorf("get file owner: %w", err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return nil, fmt.Errorf("get file owner sid: %w", err)
+	}
+	if owner == nil || !owner.IsValid() {
+		return nil, fmt.Errorf("get file owner sid: invalid owner sid")
+	}
+
+	return owner, nil
+}
 
 func buildAutoDiscoveryFileSDDL(ownerSID string) string {
 	trustees := []string{ownerSID, autoDiscoveryAdministratorsSID, autoDiscoveryLocalSystemSID}
@@ -48,11 +96,30 @@ func expectedWindowsAutoDiscoveryTrustees(owner *windows.SID) []string {
 }
 
 func validateAutoDiscoveryConfigPermissions(path string) error {
+	expectedOwnerSIDs, err := autoDiscoveryExpectedOwnerSIDs()
+	if err != nil {
+		return fmt.Errorf("get expected owner sid: %w", err)
+	}
+	owner, err := autoDiscoveryPathOwnerSID(path)
+	if err != nil {
+		return err
+	}
+	if !containsString(expectedOwnerSIDs, owner.String()) {
+		return fmt.Errorf("file owner sid %q does not match expected sids %q", owner.String(), strings.Join(expectedOwnerSIDs, ", "))
+	}
+	dirOwner, err := autoDiscoveryPathOwnerSID(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if !containsString(expectedOwnerSIDs, dirOwner.String()) {
+		return fmt.Errorf("config directory owner sid %q does not match expected sids %q", dirOwner.String(), strings.Join(expectedOwnerSIDs, ", "))
+	}
+
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return fmt.Errorf("get file security info: %w", err)
 	}
-	owner, _, err := sd.Owner()
+	owner, _, err = sd.Owner()
 	if err != nil {
 		return fmt.Errorf("get file owner sid: %w", err)
 	}
@@ -81,6 +148,16 @@ func validateAutoDiscoveryConfigPermissions(path string) error {
 	}
 
 	return nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+
+	return false
 }
 
 func enforceAutoDiscoveryConfigPermissions(path string) error {
