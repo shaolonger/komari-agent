@@ -7,6 +7,27 @@
 - 不要在命令行直接传入 `--token` 或 `-t`，这会把 token 暴露给 shell history、进程列表和容器元数据。
 - 推荐通过只读挂载的 JSON 配置文件传入敏感参数，并确保配置文件仅对 owner 可读。
 
+## 安全部署与最小权限运行
+
+- 优先使用 `--config` 或 `--token-file` 载入认证材料，不要把 token 放进命令行参数、shell history、systemd/OpenRC/procd/launchd/Windows 服务定义、Docker 启动参数或日志。
+- 仅在安装阶段使用管理员或 root 权限；安装完成后，应以专用服务账户运行 agent，并确保配置目录、`auto-discovery.json`、JSON 配置文件只对 owner 或服务账户可读写。
+- 如果业务不需要远程终端或命令执行，部署时显式加上 `--disable-web-ssh`，把远程控制面收缩到最小。
+- 如环境不允许自动更新，使用 `--disable-auto-update`，改为人工审批并配合下面的离线校验流程执行升级。
+- 容器部署时仅挂载只读配置文件和必要运行目录，不要把宿主机上不相关的敏感路径暴露给容器。
+
+## 认证材料处理规则
+
+- token 不应出现在命令行、历史记录、服务配置、Docker `run` 参数、CI 日志、代理日志、排障截图或工单粘贴内容中。
+- 若必须把 endpoint、Cloudflare Access 或 auto-discovery 等参数写入配置文件，仍应通过权限受控的 JSON 配置文件管理，而不是散落到多种服务参数中。
+- 生产环境应建立 token 主动轮换和失效流程，避免长期复用同一静态凭据。
+
+## TLS 信任模型
+
+- agent 默认依赖标准 TLS 证书校验；生产环境不应使用 `--ignore-unsafe-cert`。
+- 私有 CA 场景应把 CA 证书导入操作系统、容器镜像或运行时信任库，而不是关闭校验。
+- 当前仓库尚未实现证书固定（pinning）；如果你需要更强约束，应优先通过受控反向代理、内部 PKI 或系统信任链管理来实现。
+- 自动更新链路已经与 `--ignore-unsafe-cert` 解耦，即使开启该开关，自更新也会继续要求证书校验和 release 完整性校验。
+
 ## 安装供应链安全
 
 - `install.sh` 与 `install.ps1` 会在替换本地 agent 之前校验 GitHub Release 提供的 `.sha256` 资产；校验失败时会拒绝安装。
@@ -65,6 +86,14 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 - `scripts/verify-install-sh-integrity.sh` 会验证 `install.sh` 的哈希校验和可信代理约束在篡改样本上 fail closed。
 - `scripts/verify-install-ps1-integrity.ps1` 会验证 `install.ps1` 的哈希校验和可信代理约束在篡改样本上 fail closed。
 - `scripts/verify-supply-chain-stage.ps1` 会串联 Release 资产检查、`go test ./update` 和安装脚本验收；在 live release 尚未补齐 `.sha256` 资产前，可临时使用 `-SkipLiveReleaseCheck` 只运行仓库内验证。
+
+## Token 泄漏应急处置
+
+1. 立即在服务端吊销或轮换泄漏 token，并确认旧 token 失效。
+2. 回收所有可能包含旧 token 的介质：命令行历史、服务定义、容器编排文件、代理日志、CI 日志、排障截图与临时脚本。
+3. 检查相关节点是否启用了 `--ignore-unsafe-cert` 或未禁用的远程终端能力；如有，优先下线或改为 `--disable-web-ssh` 并恢复证书校验。
+4. 使用受控 JSON 配置文件或 `--token-file` 重新部署，随后执行一次连接验证和最小权限复核。
+5. 如果泄漏范围不明，追加审计代理/网关访问日志与任务执行日志，确认是否出现异常终端、任务下发或更新行为。
 
 ## Docker 示例
 
