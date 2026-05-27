@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   security-blockers:
@@ -25,8 +26,27 @@ jobs:
         shell: pwsh
         run: .\scripts\verify-security-regression.ps1 -SkipLiveReleaseCheck
 
-  build-and-attach:
+  unit-tests:
     needs: security-blockers
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run unit tests
+        run: go test ./...
+
+  build-and-attach:
+    needs:
+      - security-blockers
+      - unit-tests
     runs-on: ubuntu-latest
 
     strategy:
@@ -50,6 +70,9 @@ jobs:
         with:
           go-version: "1.23"
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
@@ -67,6 +90,17 @@ jobs:
           go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o "$BINARY_NAME"
           sha256sum "$BINARY_NAME" > "$BINARY_NAME.sha256"
 
+      - name: Sign checksum asset
+        run: |
+          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME=${BINARY_NAME}.exe
+          elif [ "${{ matrix.goos }}" = "darwin" ]; then
+            true
+          fi
+          cosign sign-blob --yes --output-signature "$BINARY_NAME.sha256.sig" --output-certificate "$BINARY_NAME.sha256.pem" "$BINARY_NAME.sha256"
+        shell: bash
+
       - name: Upload release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,5 +111,5 @@ jobs:
           elif [ "${{ matrix.goos }}" = "darwin" ]; then
             true
           fi
-          gh release upload ${{ github.event.release.tag_name }} "$BINARY_NAME" "$BINARY_NAME.sha256" --repo ${{ github.repository }}
+          gh release upload ${{ github.event.release.tag_name }} "$BINARY_NAME" "$BINARY_NAME.sha256" "$BINARY_NAME.sha256.sig" "$BINARY_NAME.sha256.pem" --repo ${{ github.repository }}
         shell: bash

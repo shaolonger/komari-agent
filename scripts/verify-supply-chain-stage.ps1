@@ -47,14 +47,22 @@ try {
     if (-not $SkipLiveReleaseCheck) {
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/komari-monitor/komari-agent/releases/latest' -UseBasicParsing
         $assetNames = @($release.assets | Select-Object -ExpandProperty name)
-        $binaryAssets = @($assetNames | Where-Object { $_ -notlike '*.sha256' })
+        $binaryAssets = @($assetNames | Where-Object { $_ -notmatch '\.(sha256|sig|pem)$' })
         $missingChecksums = @($binaryAssets | Where-Object { "$_.sha256" -notin $assetNames })
+        $missingChecksumSignatures = @($binaryAssets | Where-Object { "$_.sha256.sig" -notin $assetNames })
+        $missingChecksumCertificates = @($binaryAssets | Where-Object { "$_.sha256.pem" -notin $assetNames })
 
         if ($missingChecksums.Count -gt 0) {
             throw "Latest release $($release.tag_name) is missing checksum assets for: $($missingChecksums -join ', ')"
         }
+        if ($missingChecksumSignatures.Count -gt 0) {
+            throw "Latest release $($release.tag_name) is missing checksum signatures for: $($missingChecksumSignatures -join ', ')"
+        }
+        if ($missingChecksumCertificates.Count -gt 0) {
+            throw "Latest release $($release.tag_name) is missing checksum signing certificates for: $($missingChecksumCertificates -join ', ')"
+        }
 
-        Write-Host "Latest release $($release.tag_name) includes checksum assets for all published binaries."
+        Write-Host "Latest release $($release.tag_name) includes checksum and checksum-signing assets for all published binaries."
     }
 
     & go test ./update

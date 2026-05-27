@@ -1,0 +1,29 @@
+name: Optional Network Integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      go_test_run:
+        description: Go test regex for optional network/integration cases
+        required: false
+        default: ^TestIntegration
+
+permissions:
+  contents: read
+
+jobs:
+  network-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run optional network integration tests
+        run: go test ./... -run '${{ inputs.go_test_run }}'

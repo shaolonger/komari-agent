@@ -23,6 +23,11 @@ try {
         throw 'verify-token-query-guard.ps1 failed'
     }
 
+    & (Join-Path $PSScriptRoot 'verify-install-redaction-guard.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'verify-install-redaction-guard.ps1 failed'
+    }
+
     Write-Host 'Security regression checks completed.'
 }
 finally {
