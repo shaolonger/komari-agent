@@ -202,10 +202,45 @@ function Assert-KomariFileHash {
     }
 }
 
+function Assert-TrustedGitHubProxy {
+    param(
+        [string]$Value,
+        [switch]$TrustAcknowledged
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    if (-not $TrustAcknowledged.IsPresent) {
+        throw "Using --install-ghproxy requires --install-ghproxy-trusted. Only organization-controlled trusted HTTPS proxies are supported."
+    }
+
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Value, [System.UriKind]::Absolute, [ref]$uri)) {
+        throw "--install-ghproxy must be an absolute https:// URL."
+    }
+
+    if ($uri.Scheme -ne 'https') {
+        throw "--install-ghproxy must use https://."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($uri.UserInfo)) {
+        throw "--install-ghproxy must not include embedded credentials."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($uri.Query) -or -not [string]::IsNullOrWhiteSpace($uri.Fragment)) {
+        throw "--install-ghproxy must not include query strings or fragments."
+    }
+
+    return $uri.GetLeftPart([System.UriPartial]::Path).TrimEnd('/')
+}
+
 # Default parameters
 $InstallDir = Join-Path $Env:ProgramFiles "Komari"
 $ServiceName = "komari-agent"
 $GitHubProxy = ""
+$GitHubProxyTrusted = $false
 $KomariArgs = @()
 $TokenValue = ""
 $HasExplicitConfig = $false
@@ -216,7 +251,16 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     switch ($args[$i]) {
         "--install-dir" { $InstallDir = $args[$i + 1]; $i++; continue }
         "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
-        "--install-ghproxy" { $GitHubProxy = $args[$i + 1]; $i++; continue }
+        "--install-ghproxy" {
+            if ($i + 1 -ge $args.Count) {
+                Log-Error "Missing value for --install-ghproxy"
+                exit 1
+            }
+            $GitHubProxy = $args[$i + 1]
+            $i++
+            continue
+        }
+        "--install-ghproxy-trusted" { $GitHubProxyTrusted = $true; continue }
         "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
         "--token" {
             if ($i + 1 -ge $args.Count) {
@@ -267,6 +311,17 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 if (-not [string]::IsNullOrWhiteSpace($TokenValue) -and $HasExplicitConfig) {
     Log-Error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
     exit 1
+}
+
+if (-not [string]::IsNullOrWhiteSpace($GitHubProxy)) {
+    try {
+        $GitHubProxy = Assert-TrustedGitHubProxy -Value $GitHubProxy -TrustAcknowledged:$GitHubProxyTrusted
+    }
+    catch {
+        Log-Error $_.Exception.Message
+        exit 1
+    }
+    Log-Warning "Using --install-ghproxy only with an organization-controlled HTTPS proxy that mirrors GitHub release binaries and .sha256 assets without modification."
 }
 
 # Ensure running as Administrator

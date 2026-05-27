@@ -174,10 +174,45 @@ verify_release_checksum() {
     [ "$actual_checksum" = "$expected_checksum" ]
 }
 
+normalize_trusted_github_proxy() {
+    local proxy_url="$1"
+    local trusted_flag="$2"
+
+    if [ -z "$proxy_url" ]; then
+        return 0
+    fi
+
+    if [ "$trusted_flag" != "true" ]; then
+        printf '%s' "Using --install-ghproxy requires --install-ghproxy-trusted. Only organization-controlled trusted HTTPS proxies are supported." >&2
+        return 1
+    fi
+
+    case "$proxy_url" in
+        https://*) ;;
+        *)
+            printf '%s' "--install-ghproxy must use an https:// URL." >&2
+            return 1
+            ;;
+    esac
+
+    if printf '%s' "$proxy_url" | grep -Eq '://[^/@[:space:]]+@'; then
+        printf '%s' "--install-ghproxy must not include embedded credentials." >&2
+        return 1
+    fi
+
+    if printf '%s' "$proxy_url" | grep -Eq '[?#]'; then
+        printf '%s' "--install-ghproxy must not include query strings or fragments." >&2
+        return 1
+    fi
+
+    printf '%s' "${proxy_url%/}"
+}
+
 # Default values
 service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
+github_proxy_trusted=false
 install_version="" # New parameter for specifying version
  
 
@@ -224,8 +259,16 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --install-ghproxy)
+            if [ $# -lt 2 ]; then
+                log_error "Missing value for $1"
+                exit 1
+            fi
             github_proxy="$2"
             shift 2
+            ;;
+        --install-ghproxy-trusted)
+            github_proxy_trusted=true
+            shift
             ;;
         --install-version)
             install_version="$2"
@@ -276,6 +319,16 @@ done
 if [ -n "$komari_token" ] && [ "$komari_has_explicit_config" = true ]; then
     log_error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
     exit 1
+fi
+
+if [ -n "$github_proxy" ]; then
+    proxy_validation_output="$(normalize_trusted_github_proxy "$github_proxy" "$github_proxy_trusted" 2>&1)"
+    if [ $? -ne 0 ]; then
+        log_error "$proxy_validation_output"
+        exit 1
+    fi
+    github_proxy="$proxy_validation_output"
+    log_warning "Using --install-ghproxy only with an organization-controlled HTTPS proxy that mirrors GitHub release binaries and .sha256 assets without modification."
 fi
 
 # Remove leading space from komari_args if present
