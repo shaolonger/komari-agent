@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -17,25 +16,33 @@ import (
 	ping "github.com/prometheus-community/pro-bing"
 )
 
+const defaultTaskExecutionTimeout = 5 * time.Minute
+
+var taskExecutionTimeout = defaultTaskExecutionTimeout
+var taskResultUploader = uploadTaskResult
+
 func NewTask(task_id, command string) {
 	if task_id == "" {
 		return
 	}
 	if command == "" {
-		uploadTaskResult(task_id, "No command provided", 0, time.Now())
+		taskResultUploader(task_id, "No command provided", 0, time.Now())
 		return
 	}
 	if flags.DisableWebSsh {
-		uploadTaskResult(task_id, "Remote control is disabled.", -1, time.Now())
+		taskResultUploader(task_id, "Remote control is disabled.", -1, time.Now())
 		return
 	}
 	log.Printf("Executing task %s with command: %s", task_id, command)
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "+command)
-	} else {
-		cmd = exec.Command("sh", "-c", command)
-	}
+	result, exitCode, finishedAt := executeTaskCommand(command)
+	taskResultUploader(task_id, result, exitCode, finishedAt)
+}
+
+func executeTaskCommand(command string) (string, int, time.Time) {
+	ctx, cancel := context.WithTimeout(context.Background(), taskExecutionTimeout)
+	defer cancel()
+
+	cmd := newTaskCommand(ctx, command)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -43,19 +50,48 @@ func NewTask(task_id, command string) {
 	err := cmd.Run()
 	finishedAt := time.Now()
 
-	result := stdout.String()
-	if stderr.Len() > 0 {
-		result += "\n" + stderr.String()
-	}
+	result := collectTaskOutput(stdout.String(), stderr.String())
 	result = strings.ReplaceAll(result, "\r\n", "\n")
+
 	exitCode := 0
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			exitCode = exitError.ExitCode()
-		}
+	if err == nil {
+		return result, exitCode, finishedAt
 	}
 
-	uploadTaskResult(task_id, result, exitCode, finishedAt)
+	var exitError *exec.ExitError
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		exitCode = -1
+		result = appendTaskOutput(result, "Task execution timed out.")
+	case errors.Is(err, context.DeadlineExceeded):
+		exitCode = -1
+		result = appendTaskOutput(result, "Task execution timed out.")
+	case errors.As(err, &exitError):
+		exitCode = exitError.ExitCode()
+	default:
+		exitCode = -1
+		result = appendTaskOutput(result, err.Error())
+	}
+
+	return result, exitCode, finishedAt
+}
+
+func collectTaskOutput(stdout, stderr string) string {
+	result := stdout
+	if stderr != "" {
+		result = appendTaskOutput(result, stderr)
+	}
+	return result
+}
+
+func appendTaskOutput(result, addition string) string {
+	if addition == "" {
+		return result
+	}
+	if result == "" {
+		return addition
+	}
+	return result + "\n" + addition
 }
 
 func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time) {

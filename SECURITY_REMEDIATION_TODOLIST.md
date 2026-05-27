@@ -178,7 +178,7 @@ Date: 2026-05-26
 
 ### 4.2 任务执行安全边界
 
-- [ ] 将 `cmd.Run()` 改为 `exec.CommandContext`，为任务增加超时与取消机制。
+- [x] 将 `cmd.Run()` 改为 `exec.CommandContext`，为任务增加超时与取消机制。
 - [ ] 为 stdout/stderr 增加大小限制，避免 `bytes.Buffer` 无界增长。
 - [ ] 评估改为流式上报任务输出，而不是先全部缓存到内存。
 - [ ] 对单机并发任务数增加上限与排队策略。
