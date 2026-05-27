@@ -1,11 +1,50 @@
 package update
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/blang/semver"
 	"github.com/rhysd/go-github-selfupdate/selfupdate"
 )
+
+type stubSelfUpdater struct {
+	release *selfupdate.Release
+	err     error
+}
+
+func (s stubSelfUpdater) UpdateSelf(current semver.Version, slug string) (*selfupdate.Release, error) {
+	return s.release, s.err
+}
+
+func useUpdateHooks(t *testing.T, updater selfUpdater, updateErr error, exitCode *int) {
+	t.Helper()
+
+	previousUpdater := newSelfUpdater
+	previousExit := exitProcess
+	previousVersion := CurrentVersion
+	previousClient := http.DefaultClient
+
+	newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		return updater, nil
+	}
+	exitProcess = func(code int) {
+		*exitCode = code
+	}
+	CurrentVersion = "1.0.0"
+
+	t.Cleanup(func() {
+		newSelfUpdater = previousUpdater
+		exitProcess = previousExit
+		CurrentVersion = previousVersion
+		http.DefaultClient = previousClient
+	})
+}
 
 // TestParseVersion 验证 parseVersion 能够解析各种版本号格式，包括带 v/V 前缀、预发布和构建元数据
 func TestParseVersion(t *testing.T) {
@@ -82,5 +121,44 @@ func TestSelfUpdateConfigUsesSHA2Validator(t *testing.T) {
 	}
 	if got := validator.Suffix(); got != ".sha256" {
 		t.Fatalf("validator.Suffix() = %q, want %q", got, ".sha256")
+	}
+}
+
+func TestCheckAndUpdateDoesNotExitOnUpdaterError(t *testing.T) {
+	exitCode := 0
+	useUpdateHooks(t, stubSelfUpdater{}, nil, &exitCode)
+
+	updateFailure := errors.New("Failed validating asset content: hash mismatch")
+	newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
+		return stubSelfUpdater{err: updateFailure}, nil
+	}
+
+	err := CheckAndUpdate()
+	if err == nil {
+		t.Fatal("CheckAndUpdate() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "failed to check for updates") {
+		t.Fatalf("CheckAndUpdate() error = %q, want substring %q", err.Error(), "failed to check for updates")
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
+	}
+}
+
+func TestCheckAndUpdateExitsAfterSuccessfulUpdate(t *testing.T) {
+	exitCode := 0
+	releaseVersion, err := semver.Parse("1.0.1")
+	if err != nil {
+		t.Fatalf("semver.Parse() error = %v", err)
+	}
+	useUpdateHooks(t, stubSelfUpdater{
+		release: &selfupdate.Release{Version: releaseVersion},
+	}, nil, &exitCode)
+
+	if err := CheckAndUpdate(); err != nil {
+		t.Fatalf("CheckAndUpdate() error = %v", err)
+	}
+	if exitCode != 42 {
+		t.Fatalf("exitProcess() code = %d, want %d", exitCode, 42)
 	}
 }

@@ -18,6 +18,16 @@ var (
 	Repo           string = "komari-monitor/komari-agent"
 )
 
+type selfUpdater interface {
+	UpdateSelf(current semver.Version, slug string) (*selfupdate.Release, error)
+}
+
+var newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
+	return selfupdate.NewUpdater(config)
+}
+
+var exitProcess = os.Exit
+
 // parseVersion 解析可能带有 v/V 前缀，以及预发布或构建元数据的版本字符串
 func parseVersion(ver string) (semver.Version, error) {
 	ver = strings.TrimPrefix(ver, "v")
@@ -55,7 +65,7 @@ func CheckAndUpdate() error {
 
 	http.DefaultClient = dnsresolver.GetHTTPClient(60 * time.Second)
 	config := selfUpdateConfig()
-	updater, err := selfupdate.NewUpdater(config)
+	updater, err := newSelfUpdater(config)
 	if err != nil {
 		return fmt.Errorf("failed to create updater: %v", err)
 	}
@@ -84,6 +94,6 @@ func CheckAndUpdate() error {
 	// 	return fmt.Errorf("failed to restart program: %v", err)
 	// }
 	log.Printf("Successfully updated to version %s\n", latest.Version)
-	os.Exit(42)
+	exitProcess(42)
 	return nil
 }
