@@ -31,3 +31,7 @@ jobs:
       - name: Guard InsecureSkipVerify usage
         shell: pwsh
         run: .\scripts\verify-insecure-skip-verify-guard.ps1
+
+      - name: Guard token query auth usage
+        shell: pwsh
+        run: .\scripts\verify-token-query-guard.ps1
