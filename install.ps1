@@ -48,7 +48,7 @@ function Format-KomariArgsForLog {
     return $displayArgs -join ' '
 }
 
-function Write-KomariTokenFile {
+function Write-KomariConfigFile {
     param(
         [string]$Path,
         [string]$Token
@@ -58,12 +58,12 @@ function Write-KomariTokenFile {
         return
     }
 
-    $trimmedToken = $Token.Trim()
-    [System.IO.File]::WriteAllText($Path, "$trimmedToken`n", [System.Text.UTF8Encoding]::new($false))
+    $configJson = @{ token = $Token.Trim() } | ConvertTo-Json -Depth 2
+    [System.IO.File]::WriteAllText($Path, "$configJson`r`n", [System.Text.UTF8Encoding]::new($false))
 
     $icaclsOutput = & icacls $Path /inheritance:r /grant:r "Administrators:F" /grant:r "SYSTEM:F" 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to restrict token file ACLs: $icaclsOutput"
+        throw "Failed to restrict config file ACLs: $icaclsOutput"
     }
 }
 
@@ -73,6 +73,7 @@ $ServiceName = "komari-agent"
 $GitHubProxy = ""
 $KomariArgs = @()
 $TokenValue = ""
+$HasExplicitConfig = $false
 $InstallVersion = ""
 
 # Parse script arguments
@@ -100,6 +101,17 @@ for ($i = 0; $i -lt $args.Count; $i++) {
             $i++
             continue
         }
+        "--config" {
+            if ($i + 1 -ge $args.Count) {
+                Log-Error "Missing value for --config"
+                exit 1
+            }
+            $HasExplicitConfig = $true
+            $KomariArgs += $args[$i]
+            $KomariArgs += $args[$i + 1]
+            $i++
+            continue
+        }
         Default {
             if ($args[$i] -like '--token=*') {
                 $TokenValue = $args[$i].Substring('--token='.Length)
@@ -109,9 +121,17 @@ for ($i = 0; $i -lt $args.Count; $i++) {
                 $TokenValue = $args[$i].Substring('-t='.Length)
                 continue
             }
+            if ($args[$i] -like '--config=*') {
+                $HasExplicitConfig = $true
+            }
             $KomariArgs += $args[$i]
         }
     }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($TokenValue) -and $HasExplicitConfig) {
+    Log-Error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
+    exit 1
 }
 
 # Ensure running as Administrator
@@ -123,9 +143,10 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 
 # Prepare GitHub proxy display
 if ($GitHubProxy -ne '') { $ProxyDisplay = $GitHubProxy } else { $ProxyDisplay = '(direct)' }
-$TokenFile = Join-Path $InstallDir 'komari-agent.token'
+$ConfigFile = Join-Path $InstallDir 'komari-agent.json'
+$LegacyTokenFile = Join-Path $InstallDir 'komari-agent.token'
 if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
-    $KomariArgs += "--token-file=`"$TokenFile`""
+    $KomariArgs += "--config=`"$ConfigFile`""
 }
 $RedactedArgString = Format-KomariArgsForLog -Arguments $KomariArgs
 
@@ -255,7 +276,7 @@ Log-Config "Install directory: $InstallDir"
 Log-Config "GitHub proxy: $ProxyDisplay"
 Log-Config "Agent arguments: $RedactedArgString"
 if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
-    Log-Config "Token file: $TokenFile"
+    Log-Config "Config file: $ConfigFile"
 }
 if ($InstallVersion -ne "") {
     Log-Config "Specified agent version: $InstallVersion"
@@ -300,9 +321,14 @@ function Uninstall-Previous {
         Remove-Item $AgentPath -Force
     }
 
-    if (Test-Path $TokenFile) {
+    if (Test-Path $ConfigFile) {
+        Log-Warning "Removing old config file..."
+        Remove-Item $ConfigFile -Force
+    }
+
+    if (Test-Path $LegacyTokenFile) {
         Log-Warning "Removing old token file..."
-        Remove-Item $TokenFile -Force
+        Remove-Item $LegacyTokenFile -Force
     }
 }
 Uninstall-Previous
@@ -344,15 +370,15 @@ catch {
 Log-Success "Downloaded and saved to $AgentPath"
 
 if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
-    Log-Step "Writing service token file..."
+    Log-Step "Writing service config file..."
     try {
-        Write-KomariTokenFile -Path $TokenFile -Token $TokenValue
+        Write-KomariConfigFile -Path $ConfigFile -Token $TokenValue
     }
     catch {
-        Log-Error "Failed to write token file: $_"
+        Log-Error "Failed to write config file: $_"
         exit 1
     }
-    Log-Success "Service token stored at $TokenFile"
+    Log-Success "Service config stored at $ConfigFile"
 }
 
 # Register and start service

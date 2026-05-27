@@ -35,18 +35,37 @@ log_config() {
     echo -e "${CYAN}[CONFIG]${NC} $1"
 }
 
-write_komari_token_file() {
-    local token_file="$1"
+json_escape() {
+    local value="$1"
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+
+    printf '%s' "$value"
+}
+
+write_komari_config_file() {
+    local config_file="$1"
+    local escaped_token
 
     if [ -z "$komari_token" ]; then
         return 0
     fi
 
-    if ! (umask 077 && printf '%s\n' "$komari_token" > "$token_file"); then
+    escaped_token="$(json_escape "$komari_token")"
+    if ! (umask 077 && cat > "$config_file" << EOF
+{
+  "token": "$escaped_token"
+}
+EOF
+); then
         return 1
     fi
 
-    chmod 600 "$token_file"
+    chmod 600 "$config_file"
 }
 
 redact_komari_args() {
@@ -119,6 +138,7 @@ esac
 # Parse install-specific arguments
 komari_token=""
 komari_args=""
+komari_has_explicit_config=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir)
@@ -153,6 +173,20 @@ while [[ $# -gt 0 ]]; do
             komari_token="${1#*=}"
             shift
             ;;
+        --config)
+            if [ $# -lt 2 ]; then
+                log_error "Missing value for $1"
+                exit 1
+            fi
+            komari_has_explicit_config=true
+            komari_args="$komari_args $1 $2"
+            shift 2
+            ;;
+        --config=*)
+            komari_has_explicit_config=true
+            komari_args="$komari_args $1"
+            shift
+            ;;
         --install*)
             log_warning "Unknown install parameter: $1"
             shift
@@ -165,14 +199,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ -n "$komari_token" ] && [ "$komari_has_explicit_config" = true ]; then
+    log_error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
+    exit 1
+fi
+
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
 
 komari_agent_path="${target_dir}/agent"
-komari_token_file="${target_dir}/komari-agent.token"
+komari_config_file="${target_dir}/komari-agent.json"
+legacy_komari_token_file="${target_dir}/komari-agent.token"
 komari_service_args="$komari_args"
 if [ -n "$komari_token" ]; then
-    komari_service_args="$komari_service_args --token-file $komari_token_file"
+    komari_service_args="$komari_service_args --config $komari_config_file"
 fi
 komari_service_args="${komari_service_args# }"
 komari_service_args_log="$(redact_komari_args "$komari_service_args")"
@@ -200,7 +240,7 @@ log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_service_args_log${NC}"
 if [ -n "$komari_token" ]; then
-    log_config "  Token file: ${GREEN}$komari_token_file${NC}"
+    log_config "  Config file: ${GREEN}$komari_config_file${NC}"
 fi
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
@@ -258,9 +298,14 @@ uninstall_previous() {
         rm -f "$komari_agent_path"
     fi
 
-    if [ -f "$komari_token_file" ]; then
+    if [ -f "$komari_config_file" ]; then
+        log_info "Removing old config file..."
+        rm -f "$komari_config_file"
+    fi
+
+    if [ -f "$legacy_komari_token_file" ]; then
         log_info "Removing old token file..."
-        rm -f "$komari_token_file"
+        rm -f "$legacy_komari_token_file"
     fi
 }
 
@@ -402,12 +447,12 @@ chmod +x "$komari_agent_path"
 log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
 if [ -n "$komari_token" ]; then
-    log_step "Writing service token file..."
-    if ! write_komari_token_file "$komari_token_file"; then
-        log_error "Failed to write token file: $komari_token_file"
+    log_step "Writing service config file..."
+    if ! write_komari_config_file "$komari_config_file"; then
+        log_error "Failed to write config file: $komari_config_file"
         exit 1
     fi
-    log_success "Service token stored at ${GREEN}$komari_token_file${NC}"
+    log_success "Service config stored at ${GREEN}$komari_config_file${NC}"
 fi
 
 # Detect init system and configure service
