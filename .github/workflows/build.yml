@@ -6,7 +6,25 @@ on:
       - main
 
 jobs:
+  security-blockers:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run security regression blockers
+        shell: pwsh
+        run: .\scripts\verify-security-regression.ps1 -SkipLiveReleaseCheck
+
   build:
+    needs: security-blockers
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

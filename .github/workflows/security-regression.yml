@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  supply-chain-checklist:
+  security-regression:
     runs-on: windows-latest
     timeout-minutes: 15
 
@@ -24,14 +24,6 @@ jobs:
         with:
           go-version: "1.23"
 
-      - name: Run supply-chain regression checklist
+      - name: Run security regression checks
         shell: pwsh
-        run: .\scripts\verify-supply-chain-stage.ps1 -SkipLiveReleaseCheck
-
-      - name: Guard InsecureSkipVerify usage
-        shell: pwsh
-        run: .\scripts\verify-insecure-skip-verify-guard.ps1
-
-      - name: Guard token query auth usage
-        shell: pwsh
-        run: .\scripts\verify-token-query-guard.ps1
+        run: .\scripts\verify-security-regression.ps1 -SkipLiveReleaseCheck
