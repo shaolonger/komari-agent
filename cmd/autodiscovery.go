@@ -16,6 +16,10 @@ import (
 	"github.com/komari-monitor/komari-agent/utils"
 )
 
+const autoDiscoveryConfigFilePerm os.FileMode = 0o600
+
+var autoDiscoveryConfigPath = getAutoDiscoveryFilePath
+
 // AutoDiscoveryConfig 自动发现配置结构体
 type AutoDiscoveryConfig struct {
 	UUID  string `json:"uuid"`
@@ -51,7 +55,7 @@ func getAutoDiscoveryFilePath() string {
 
 // loadAutoDiscoveryConfig 加载自动发现配置
 func loadAutoDiscoveryConfig() (*AutoDiscoveryConfig, error) {
-	configPath := getAutoDiscoveryFilePath()
+	configPath := autoDiscoveryConfigPath()
 
 	// 检查文件是否存在
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -75,7 +79,7 @@ func loadAutoDiscoveryConfig() (*AutoDiscoveryConfig, error) {
 
 // saveAutoDiscoveryConfig 保存自动发现配置
 func saveAutoDiscoveryConfig(config *AutoDiscoveryConfig) error {
-	configPath := getAutoDiscoveryFilePath()
+	configPath := autoDiscoveryConfigPath()
 
 	// 序列化为JSON
 	data, err := json.MarshalIndent(config, "", "  ")
@@ -84,8 +88,11 @@ func saveAutoDiscoveryConfig(config *AutoDiscoveryConfig) error {
 	}
 
 	// 写入文件
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := os.WriteFile(configPath, data, autoDiscoveryConfigFilePerm); err != nil {
 		return fmt.Errorf("failed to write auto-discovery config: %v", err)
+	}
+	if err := enforceAutoDiscoveryConfigPermissions(configPath); err != nil {
+		return fmt.Errorf("failed to secure auto-discovery config: %v", err)
 	}
 
 	log.Printf("Auto-discovery config saved to: %s", configPath)
