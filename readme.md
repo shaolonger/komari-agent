@@ -55,6 +55,7 @@
 - `install.ps1` 在下载 `nssm-2.24.zip` 后会校验官方发布页公开的摘要；校验失败时不会继续解压或注册服务。
 - `--install-ghproxy` 仅允许用于组织自管、可信、HTTPS 的代理或镜像，并且必须同时显式传入 `--install-ghproxy-trusted`。
 - 不要使用未知第三方公共代理作为安装源；代理必须原样转发二进制和对应 `.sha256` 资产，不能重打包、二次压缩或篡改内容。
+- 如果你直接使用 fork 仓库里的 `install.sh` / `install.ps1`，必须先在该 fork 的 GitHub Releases 发布对应二进制和 `.sha256` 资产；仅推送 `main` 分支代码而不发布 release 时，installer 会明确拒绝继续下载。
 
 ## Release 签名与保管模型
 

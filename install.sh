@@ -208,6 +208,31 @@ normalize_trusted_github_proxy() {
     printf '%s' "${proxy_url%/}"
 }
 
+resolve_release_version() {
+    local api_url="https://api.github.com/repos/${release_repo}/releases/latest"
+    local latest_release_response
+
+    if [ -n "$install_version" ]; then
+        log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
+        version_to_install="$install_version"
+        return 0
+    fi
+
+    log_step "Fetching latest release version from GitHub API..."
+    if ! latest_release_response="$(curl -fsSL "$api_url")"; then
+        log_error "No published GitHub release is available in ${release_repo}. Publish a release with binary and .sha256 assets, or rerun with --install-version for an existing release tag."
+        exit 1
+    fi
+
+    version_to_install="$(printf '%s' "$latest_release_response" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    if [ -z "$version_to_install" ]; then
+        log_error "Failed to determine the latest release tag from ${release_repo}."
+        exit 1
+    fi
+
+    log_success "Latest version fetched: ${GREEN}$version_to_install${NC}"
+}
+
 stage_installer_for_sudo() {
     local script_source="$1"
     local staged_script
@@ -275,6 +300,7 @@ target_dir="/opt/komari"
 github_proxy=""
 github_proxy_trusted=false
 install_version="" # New parameter for specifying version
+release_repo="shaolonger/komari-agent"
 original_args=("$@")
 
 trap cleanup_staged_installer_copy EXIT
@@ -591,21 +617,12 @@ case $arch in
 esac
 log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
 
-version_to_install="latest"
-if [ -n "$install_version" ]; then
-    log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
-    version_to_install="$install_version"
-else
-    log_info "No version specified, installing the latest version."
-fi
+version_to_install=""
+resolve_release_version
 
 # Construct download URL
 file_name="komari-agent-${os_name}-${arch}"
-if [ "$version_to_install" = "latest" ]; then
-    download_path="latest/download"
-else
-    download_path="download/${version_to_install}"
-fi
+download_path="download/${version_to_install}"
 
 if [ -n "$github_proxy" ]; then
     # Use proxy for GitHub releases
@@ -632,7 +649,7 @@ else
 fi
 if ! curl -fL -o "$download_tmp_path" "$download_url"; then
     rm -f "$download_tmp_path" "$checksum_tmp_path"
-    log_error "Download failed"
+    log_error "Download failed. Ensure ${release_repo} release ${version_to_install} includes ${file_name}."
     exit 1
 fi
 
@@ -640,7 +657,7 @@ log_step "Downloading SHA256 checksum for $file_name..."
 log_info "URL: ${CYAN}$(redact_url_for_log "$checksum_url")${NC}"
 if ! curl -fL -o "$checksum_tmp_path" "$checksum_url"; then
     rm -f "$download_tmp_path" "$checksum_tmp_path"
-    log_error "Checksum download failed"
+    log_error "Checksum download failed. Ensure ${release_repo} release ${version_to_install} includes ${file_name}.sha256."
     exit 1
 fi
 

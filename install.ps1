@@ -526,13 +526,14 @@ function Uninstall-Previous {
 }
 Uninstall-Previous
 
+$ReleaseRepository = 'shaolonger/komari-agent'
 $versionToInstall = ""
 if ($InstallVersion -ne "") {
     Log-Info "Attempting to install specified version: $InstallVersion"
     $versionToInstall = $InstallVersion
 }
 else {
-    $ApiUrl = "https://api.github.com/repos/shaolonger/komari-agent/releases/latest"
+    $ApiUrl = "https://api.github.com/repos/$ReleaseRepository/releases/latest"
     try {
         Log-Step "Fetching latest release version from GitHub API..."
         $release = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
@@ -540,7 +541,7 @@ else {
         Log-Success "Latest version fetched: $versionToInstall"
     }
     catch {
-        Log-Error "Failed to fetch latest version: $_"
+        Log-Error "No published GitHub release is available in $ReleaseRepository. Publish a release with binary and .sha256 assets, or rerun with --install-version for an existing release tag."
         exit 1
     }
 }
@@ -569,7 +570,7 @@ try {
     Move-Item -Path $AgentDownloadTempPath -Destination $AgentPath -Force
 }
 catch {
-    Log-Error "Download or verification failed: $_"
+    Log-Error "Download or verification failed. Ensure $ReleaseRepository release $versionToInstall includes $BinaryName and $BinaryName.sha256."
     exit 1
 }
 finally {
