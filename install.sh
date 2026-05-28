@@ -208,12 +208,63 @@ normalize_trusted_github_proxy() {
     printf '%s' "${proxy_url%/}"
 }
 
+stage_installer_for_sudo() {
+    local script_source="$1"
+    local staged_script
+
+    staged_script="$(mktemp "${TMPDIR:-/tmp}/komari-install.XXXXXX")" || return 1
+    if ! cat "$script_source" > "$staged_script"; then
+        rm -f "$staged_script"
+        return 1
+    fi
+
+    chmod 700 "$staged_script" || {
+        rm -f "$staged_script"
+        return 1
+    }
+
+    printf '%s' "$staged_script"
+}
+
+cleanup_staged_installer_copy() {
+    local staged_script="${KOMARI_INSTALLER_TEMP_COPY:-}"
+
+    case "$staged_script" in
+        "${TMPDIR:-/tmp}"/komari-install.*)
+            if [ -f "$staged_script" ]; then
+                rm -f "$staged_script"
+            fi
+            ;;
+    esac
+}
+
+reexec_with_sudo() {
+    local script_source="${BASH_SOURCE[0]:-$0}"
+    local staged_script
+
+    if ! command -v sudo >/dev/null 2>&1; then
+        log_error "Please run as root or install sudo"
+        exit 1
+    fi
+
+    if ! staged_script="$(stage_installer_for_sudo "$script_source")"; then
+        log_error "Failed to stage installer for sudo re-execution"
+        exit 1
+    fi
+
+    log_info "Re-running installer with sudo to complete system-wide installation..."
+    exec sudo env KOMARI_INSTALLER_TEMP_COPY="$staged_script" bash "$staged_script" "${original_args[@]}"
+}
+
 # Default values
 service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
 github_proxy_trusted=false
 install_version="" # New parameter for specifying version
+original_args=("$@")
+
+trap cleanup_staged_installer_copy EXIT
  
 
 # Detect OS
@@ -354,8 +405,7 @@ else
 fi
 
 if [ "$EUID" -ne 0 ] && [ "$require_root_for_deps" = true ]; then
-    log_error "Please run as root"
-    exit 1
+    reexec_with_sudo
 fi
 
 echo -e "${WHITE}===========================================${NC}"

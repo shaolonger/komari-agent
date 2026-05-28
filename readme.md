@@ -11,6 +11,7 @@
 
 - 优先使用 `--config` 或 `--token-file` 载入认证材料，不要把 token 放进命令行参数、shell history、systemd/OpenRC/procd/launchd/Windows 服务定义、Docker 启动参数或日志。
 - 仅在安装阶段使用管理员或 root 权限；安装完成后，应以专用服务账户运行 agent，并确保配置目录、`auto-discovery.json`、JSON 配置文件只对 owner 或服务账户可读写。
+- Linux / macOS 上如果通过 `bash <(curl ...)` 或 `./install.sh` 由普通用户启动系统级安装，`install.sh` 会自动暂存当前脚本并通过 `sudo` 续跑；若环境没有 `sudo`，再改为手工使用 root 执行。
 - 远程终端、远程命令执行和 ping 探测默认禁用；优先按需分别启用 `--enable-terminal`、`--enable-remote-exec`、`--enable-ping`，只有确实需要完整远控面时才使用 `--enable-remote-control`。
 - 如果显式开启远程终端，默认仍会施加每台 agent 最多 1 个终端会话、300 秒空闲超时、1800 秒最大会话时长；如确有需要，再通过 `--max-terminal-sessions`、`--terminal-idle-timeout`、`--terminal-max-duration` 调整。
 - 如果显式开启 ping 探测，默认只允许 `tcp,http` 两类探测、只允许 `80,443` 端口、默认拒绝私有/环回/链路本地等敏感地址，并且会施加 `--max-concurrent-pings` 与 `--ping-min-interval-millis` 限制；只有在业务明确需要时才通过对应参数放宽。

@@ -17,6 +17,8 @@ source <(
     extract_function "verify_release_checksum"
     printf '\n'
     extract_function "normalize_trusted_github_proxy"
+    printf '\n'
+    extract_function "stage_installer_for_sudo"
 )
 
 tmp_dir="$(mktemp -d)"
@@ -62,6 +64,20 @@ fi
 
 if normalize_trusted_github_proxy 'https://mirror.example.com/github-release?token=123' 'true' >/dev/null 2>&1; then
     printf 'expected proxy query string to fail\n' >&2
+    exit 1
+fi
+
+source_script="${tmp_dir}/source-installer.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'printf test' > "$source_script"
+
+staged_script="$(stage_installer_for_sudo "$source_script")"
+if ! cmp -s "$source_script" "$staged_script"; then
+    printf 'expected staged installer copy to match original source\n' >&2
+    exit 1
+fi
+
+if [ ! -x "$staged_script" ]; then
+    printf 'expected staged installer copy to be executable\n' >&2
     exit 1
 fi
 
