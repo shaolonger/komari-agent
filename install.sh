@@ -236,11 +236,17 @@ resolve_release_version() {
 stage_installer_for_sudo() {
     local script_source="$1"
     local staged_script
+    local reexec_source_path="${KOMARI_INSTALLER_REEXEC_PATH:-}"
     local reexec_source_url="${KOMARI_INSTALLER_REEXEC_URL:-https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh}"
 
     staged_script="$(mktemp "${TMPDIR:-/tmp}/komari-install.XXXXXX")" || return 1
     if [ -f "$script_source" ]; then
         if ! cp "$script_source" "$staged_script"; then
+            rm -f "$staged_script"
+            return 1
+        fi
+    elif [ -n "$reexec_source_path" ] && [ -f "$reexec_source_path" ]; then
+        if ! cp "$reexec_source_path" "$staged_script"; then
             rm -f "$staged_script"
             return 1
         fi

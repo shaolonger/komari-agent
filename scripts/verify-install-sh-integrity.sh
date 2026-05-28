@@ -84,9 +84,9 @@ fi
 fallback_source="${tmp_dir}/fallback-installer.sh"
 printf '%s\n' '#!/usr/bin/env bash' 'printf fallback' > "$fallback_source"
 
-KOMARI_INSTALLER_REEXEC_URL="file://${fallback_source}"
+KOMARI_INSTALLER_REEXEC_PATH="$fallback_source"
 fallback_staged_script="$(stage_installer_for_sudo "$tmp_dir")"
-unset KOMARI_INSTALLER_REEXEC_URL
+unset KOMARI_INSTALLER_REEXEC_PATH
 
 if ! cmp -s "$fallback_source" "$fallback_staged_script"; then
     printf 'expected fallback staged installer copy to match downloaded source\n' >&2
