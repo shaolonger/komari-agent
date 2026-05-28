@@ -211,11 +211,24 @@ normalize_trusted_github_proxy() {
 stage_installer_for_sudo() {
     local script_source="$1"
     local staged_script
+    local reexec_source_url="${KOMARI_INSTALLER_REEXEC_URL:-https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh}"
 
     staged_script="$(mktemp "${TMPDIR:-/tmp}/komari-install.XXXXXX")" || return 1
-    if ! cat "$script_source" > "$staged_script"; then
-        rm -f "$staged_script"
-        return 1
+    if [ -f "$script_source" ]; then
+        if ! cp "$script_source" "$staged_script"; then
+            rm -f "$staged_script"
+            return 1
+        fi
+    else
+        if ! command -v curl >/dev/null 2>&1; then
+            rm -f "$staged_script"
+            return 1
+        fi
+
+        if ! curl -fsSL -o "$staged_script" "$reexec_source_url"; then
+            rm -f "$staged_script"
+            return 1
+        fi
     fi
 
     chmod 700 "$staged_script" || {
