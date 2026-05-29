@@ -12,8 +12,11 @@ $installPs1 = Get-Content -Raw -Path $installPs1Path
 if ($installSh -notmatch 'komari_service_args_log="\$\(redact_komari_args "\$komari_service_args"\)"') {
     throw 'install.sh no longer derives a redacted argument string before logging service arguments.'
 }
-if ($installSh -notmatch 'log_config "  Binary arguments: \$\{GREEN\}\$komari_service_args_log\$\{NC\}"') {
-    throw 'install.sh no longer logs redacted binary arguments.'
+if (
+    $installSh -notmatch 'log_config "  (?:Agent|Binary) arguments: \$\{GREEN\}\$komari_service_args_log\$\{NC\}"' -and
+    $installSh -notmatch 'log_config "Arguments: \$\{GREEN\}\$komari_service_args_log\$\{NC\}"'
+) {
+    throw 'install.sh no longer logs redacted service arguments.'
 }
 if ($installSh -notmatch 'ExecStart = .*komari_service_args_log') {
     throw 'install.sh no longer redacts the NixOS service preview output.'
@@ -25,7 +28,7 @@ if ($installSh -match 'log_(info|warning|error|success|config)\s+"[^"]*\$komari_
     throw 'install.sh appears to log the raw token.'
 }
 
-if ($installPs1 -notmatch '\$RedactedArgString = Format-KomariArgsForLog -Arguments \$KomariArgs') {
+if ($installPs1 -notmatch '\$(?:script:)?RedactedArgString = Format-KomariArgsForLog -Arguments \$(?:script:)?(?:EffectiveKomariArgs|KomariArgs)') {
     throw 'install.ps1 no longer derives a redacted argument string before logging.'
 }
 if ($installPs1 -notmatch 'Log-Config "Agent arguments: \$RedactedArgString"') {
