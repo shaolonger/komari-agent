@@ -242,10 +242,11 @@ sudo journalctl -u komari-agent -n 100 -f
 
 推荐升级步骤：
 
-1. 先备份配置文件 `komari-agent.json`
-2. 以管理员身份重新执行 `install.ps1`，优先通过 `--config` 复用现有配置文件，而不是再次把 token 写进命令行
-3. 安装脚本会通过 NSSM 重新注册并启动 `komari-agent` 服务
-4. 升级后检查服务状态，并确认新的 Ping 配置已经写进配置文件
+1. 先确认现有配置文件确实存在，再备份 `komari-agent.json`
+2. 如果配置文件存在，优先通过 `--config` 复用现有配置文件，而不是再次把 token 写进命令行
+3. 如果配置文件不存在，不要把一个不存在的路径直接传给 `--config`；请先恢复备份，或改为传入 `--endpoint` 加 `--token` 让安装脚本重新生成配置文件
+4. 安装脚本会通过 NSSM 重新注册并启动 `komari-agent` 服务
+5. 升级后检查服务状态，并确认新的 Ping 配置已经写进配置文件
 
 ### 升级后重点复核什么
 

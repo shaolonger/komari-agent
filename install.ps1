@@ -244,6 +244,7 @@ $GitHubProxyTrusted = $false
 $KomariArgs = @()
 $TokenValue = ""
 $HasExplicitConfig = $false
+$ExplicitConfigPath = ""
 $InstallVersion = ""
 
 # Parse script arguments
@@ -286,6 +287,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
                 exit 1
             }
             $HasExplicitConfig = $true
+            $ExplicitConfigPath = $args[$i + 1]
             $KomariArgs += $args[$i]
             $KomariArgs += $args[$i + 1]
             $i++
@@ -302,6 +304,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
             }
             if ($args[$i] -like '--config=*') {
                 $HasExplicitConfig = $true
+                $ExplicitConfigPath = $args[$i].Substring('--config='.Length)
             }
             $KomariArgs += $args[$i]
         }
@@ -310,6 +313,11 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 
 if (-not [string]::IsNullOrWhiteSpace($TokenValue) -and $HasExplicitConfig) {
     Log-Error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
+    exit 1
+}
+
+if ($HasExplicitConfig -and -not (Test-Path -LiteralPath $ExplicitConfigPath -PathType Leaf)) {
+    Log-Error "The specified config file does not exist: $ExplicitConfigPath"
     exit 1
 }
 
@@ -472,6 +480,9 @@ Log-Config "Agent arguments: $RedactedArgString"
 if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
     Log-Config "Config file: $ConfigFile"
 }
+elseif ($HasExplicitConfig) {
+    Log-Config "Config file: $ExplicitConfigPath"
+}
 if ($InstallVersion -ne "") {
     Log-Config "Specified agent version: $InstallVersion"
 } else {
@@ -515,8 +526,7 @@ function Uninstall-Previous {
     }
 
     if (Test-Path $ConfigFile) {
-        Log-Warning "Removing old config file..."
-        Remove-Item $ConfigFile -Force
+        Log-Info "Preserving existing config file: $ConfigFile"
     }
 
     if (Test-Path $LegacyTokenFile) {

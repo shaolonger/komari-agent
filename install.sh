@@ -344,6 +344,7 @@ esac
 komari_token=""
 komari_args=""
 komari_has_explicit_config=false
+komari_explicit_config_path=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir)
@@ -392,11 +393,13 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             komari_has_explicit_config=true
+            komari_explicit_config_path="$2"
             komari_args="$komari_args $1 $2"
             shift 2
             ;;
         --config=*)
             komari_has_explicit_config=true
+            komari_explicit_config_path="${1#*=}"
             komari_args="$komari_args $1"
             shift
             ;;
@@ -414,6 +417,11 @@ done
 
 if [ -n "$komari_token" ] && [ "$komari_has_explicit_config" = true ]; then
     log_error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
+    exit 1
+fi
+
+if [ "$komari_has_explicit_config" = true ] && [ ! -f "$komari_explicit_config_path" ]; then
+    log_error "The specified config file does not exist: $komari_explicit_config_path"
     exit 1
 fi
 
@@ -464,6 +472,8 @@ log_config "  GitHub proxy: ${GREEN}$github_proxy_log${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_service_args_log${NC}"
 if [ -n "$komari_token" ]; then
     log_config "  Config file: ${GREEN}$komari_config_file${NC}"
+elif [ "$komari_has_explicit_config" = true ]; then
+    log_config "  Config file: ${GREEN}$komari_explicit_config_path${NC}"
 fi
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
@@ -520,8 +530,7 @@ uninstall_previous() {
     fi
 
     if [ -f "$komari_config_file" ]; then
-        log_info "Removing old config file..."
-        rm -f "$komari_config_file"
+        log_info "Preserving existing config file: $komari_config_file"
     fi
 
     if [ -f "$legacy_komari_token_file" ]; then
