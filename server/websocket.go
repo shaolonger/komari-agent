@@ -24,6 +24,19 @@ const defaultControlRequestWindow = 10 * time.Second
 var controlRequestLimiterMu sync.Mutex
 var controlRequestTimes []time.Time
 
+type controlPlaneMessage struct {
+	Message string `json:"message"`
+	// Terminal
+	TerminalId string `json:"request_id,omitempty"`
+	// Remote Exec
+	ExecCommand string `json:"command,omitempty"`
+	ExecTaskID  string `json:"task_id,omitempty"`
+	// Ping
+	PingTaskID uint   `json:"ping_task_id,omitempty"`
+	PingType   string `json:"ping_type,omitempty"`
+	PingTarget string `json:"ping_target,omitempty"`
+}
+
 func controlRequestLimit() int {
 	if flags.MaxControlRequests > 0 {
 		return flags.MaxControlRequests
@@ -58,6 +71,22 @@ func allowControlRequest(now time.Time) bool {
 	}
 	controlRequestTimes = append(controlRequestTimes, now)
 	return true
+}
+
+func isTerminalControlMessage(message controlPlaneMessage) bool {
+	return message.Message == "terminal" || message.TerminalId != ""
+}
+
+func isExecControlMessage(message controlPlaneMessage) bool {
+	return message.Message == "exec"
+}
+
+func isPingControlMessage(message controlPlaneMessage) bool {
+	return message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != ""
+}
+
+func shouldRateLimitControlRequest(message controlPlaneMessage) bool {
+	return isTerminalControlMessage(message) || isExecControlMessage(message)
 }
 
 func EstablishWebSocketConnection() {
@@ -163,45 +192,31 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 			log.Println("WebSocket read error:", err)
 			return
 		}
-		var message struct {
-			Message string `json:"message"`
-			// Terminal
-			TerminalId string `json:"request_id,omitempty"`
-			// Remote Exec
-			ExecCommand string `json:"command,omitempty"`
-			ExecTaskID  string `json:"task_id,omitempty"`
-			// Ping
-			PingTaskID uint   `json:"ping_task_id,omitempty"`
-			PingType   string `json:"ping_type,omitempty"`
-			PingTarget string `json:"ping_target,omitempty"`
-		}
+		var message controlPlaneMessage
 		err = json.Unmarshal(message_raw, &message)
 		if err != nil {
 			log.Println("Bad ws message:", err)
 			continue
 		}
-		if message.Message == "terminal" || message.TerminalId != "" || message.Message == "exec" || message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
+		if shouldRateLimitControlRequest(message) {
 			if !allowControlRequest(time.Now()) {
 				log.Printf("Remote control request rejected due to rate limiting: message=%s", message.Message)
 				if message.Message == "exec" && message.ExecTaskID != "" {
 					taskResultUploader(message.ExecTaskID, "Remote control request rejected due to rate limiting.", -1, time.Now())
 				}
-				if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
-					writePingResult(conn, message.PingTaskID, message.PingType, -1)
-				}
 				continue
 			}
 		}
 
-		if message.Message == "terminal" || message.TerminalId != "" {
+		if isTerminalControlMessage(message) {
 			go establishTerminalConnection(message.TerminalId)
 			continue
 		}
-		if message.Message == "exec" {
+		if isExecControlMessage(message) {
 			go NewTask(message.ExecTaskID, message.ExecCommand)
 			continue
 		}
-		if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
+		if isPingControlMessage(message) {
 			go NewPingTask(conn, message.PingTaskID, message.PingType, message.PingTarget)
 			continue
 		}

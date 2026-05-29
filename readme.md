@@ -20,6 +20,41 @@
 - 如环境不允许自动更新，使用 `--disable-auto-update`，改为人工审批并配合下面的离线校验流程执行升级。
 - 容器部署时仅挂载只读配置文件和必要运行目录，不要把宿主机上不相关的敏感路径暴露给容器。
 
+## 当前 fork 的远控与延迟监测默认行为
+
+- 当前 `shaolonger/komari-agent` fork 默认只开启基础监控上报；远程终端、远程命令执行和远程 ping 探测都需要显式开启。
+- 如果你要在 Komari 面板里使用“延迟监测”或批量 TCP/HTTP Ping，请显式设置 `enable_ping=true` 或启动参数 `--enable-ping`。只有在你确实要开放完整远控面时，才建议使用 `--enable-remote-control`。
+- `ignore_unsafe_cert` 仍然会禁用远程终端、远程命令执行和远程 ping；它适合作为临时测试手段，不应作为生产环境常态配置。
+- `max_control_requests` / `control_request_window` 现在只用于远程终端和远程命令执行的控制面限流；ping 探测改为只受 `max_concurrent_pings`、`ping_min_interval_millis`、目标白名单与端口白名单约束，避免批量延迟监测被通用控制面限流误判为丢包。
+
+## 延迟监测与批量 Ping 配置建议
+
+如果同一台节点要同时执行多条相同 `interval` 的延迟监测任务，请至少确认以下几点：
+
+- `enable_ping=true`
+- `allowed_ping_types` 覆盖你实际要用的类型，默认仅 `tcp,http`
+- `allowed_ping_tcp_ports` 覆盖你实际要探测的端口，默认仅 `80,443`
+- `max_concurrent_pings` 大于等于同一轮可能同时下发到该节点的任务数
+- `ping_min_interval_millis=0`，用于显式关闭每台 agent 的最小接收间隔限制
+
+注意：在当前 fork 中，`ping_min_interval_millis=0` 现在表示“关闭最小接收间隔限制”；只有负值才会回退到安全默认值 `500ms`。这意味着当服务端在同一个调度 tick 内向同一台节点下发多条 Ping 任务时，只要并发数允许，这些任务就不会再因为默认的 `500ms` 最小间隔被直接拒绝。
+
+推荐的 JSON 配置示例：
+
+```json
+{
+	"endpoint": "https://monitor.example.com",
+	"token": "replace-with-real-token",
+	"enable_ping": true,
+	"allowed_ping_types": "tcp,http",
+	"allowed_ping_tcp_ports": "80,443",
+	"max_concurrent_pings": 24,
+	"ping_min_interval_millis": 0
+}
+```
+
+如果你的延迟监测目标是私有地址、内网负载均衡器或环回 / 链路本地地址，还需要显式设置 `allow_private_ping_targets=true`。默认拒绝这些目标是有意的安全边界，而不是连接故障。
+
 ## 认证材料处理规则
 
 - token 不应出现在命令行、历史记录、服务配置、Docker `run` 参数、CI 日志、代理日志、排障截图或工单粘贴内容中。
@@ -170,6 +205,53 @@ Windows：
 2. 进程列表、服务定义、容器参数和安装日志里只保留 `--config` / `--token-file`，不再出现明文 token。
 3. 配置文件与 `auto-discovery.json` 的权限满足最小权限要求。
 4. 如果显式启用了远控能力，确认新的 capability 开关与旧部署预期一致。
+
+## 已安装节点如何升级到当前修复版
+
+### Linux / macOS（官方安装脚本或 systemd 服务）
+
+默认安装目录是 `/opt/komari`，默认服务名是 `komari-agent`，如果安装时传过 `-t/--token` 且没有显式传 `--config`，安装脚本通常已经为你生成了受限权限的配置文件 `/opt/komari/komari-agent.json`。
+
+推荐升级步骤：
+
+1. 备份现有配置文件：`sudo cp /opt/komari/komari-agent.json /opt/komari/komari-agent.json.bak`
+2. 按原先的非敏感参数重新运行安装脚本，优先直接复用已有配置文件，例如：
+
+```sh
+bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+	--config /opt/komari/komari-agent.json \
+	--enable-ping \
+	--max-concurrent-pings 24 \
+	--ping-min-interval-millis 0
+```
+
+3. 安装脚本会替换二进制并重建服务定义，随后自动执行 `systemctl daemon-reload`、`systemctl enable komari-agent.service` 和 `systemctl start komari-agent.service`
+4. 升级后立即检查：
+
+```sh
+sudo systemctl status komari-agent
+sudo journalctl -u komari-agent -n 100 -f
+```
+
+如果你是手工管理二进制，也可以直接替换 `/opt/komari/agent` 后手工执行 `sudo systemctl restart komari-agent`。
+
+### Windows（install.ps1 / NSSM 服务）
+
+默认安装目录是 `%ProgramFiles%\Komari`，默认配置文件是 `%ProgramFiles%\Komari\komari-agent.json`，默认服务名是 `komari-agent`。
+
+推荐升级步骤：
+
+1. 先备份配置文件 `komari-agent.json`
+2. 以管理员身份重新执行 `install.ps1`，优先通过 `--config` 复用现有配置文件，而不是再次把 token 写进命令行
+3. 安装脚本会通过 NSSM 重新注册并启动 `komari-agent` 服务
+4. 升级后检查服务状态，并确认新的 Ping 配置已经写进配置文件
+
+### 升级后重点复核什么
+
+- 需要延迟监测的节点是否已显式开启 `enable_ping`
+- 若同节点承载多条同 interval Ping 任务，`ping_min_interval_millis` 是否为 `0`
+- `max_control_requests` / `control_request_window` 只会影响终端和远程命令执行，不再影响 Ping
+- `ignore_unsafe_cert` 是否已经从生产环境配置中移除
 
 ## Docker 示例
 

@@ -332,10 +332,10 @@ func pingConcurrencyLimit() int {
 }
 
 func pingMinInterval() time.Duration {
-	if flags.PingMinIntervalMillis > 0 {
-		return time.Duration(flags.PingMinIntervalMillis) * time.Millisecond
+	if flags.PingMinIntervalMillis < 0 {
+		return defaultPingMinInterval
 	}
-	return defaultPingMinInterval
+	return time.Duration(flags.PingMinIntervalMillis) * time.Millisecond
 }
 
 func tryAcquirePingExecutionSlot() (func(), bool) {

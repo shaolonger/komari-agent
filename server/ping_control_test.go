@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -135,6 +136,50 @@ func TestNewPingTaskRejectsWhenConcurrencyLimitReached(t *testing.T) {
 	if got := capture.payload["value"]; got != -1 {
 		t.Fatalf("payload value = %v, want %d", got, -1)
 	}
+}
+
+func TestNewPingTaskAllowsBurstWhenMinIntervalDisabled(t *testing.T) {
+	useServerFlagsSnapshot(t)
+	resetPingLimiters(t)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener.Addr() type = %T, want *net.TCPAddr", listener.Addr())
+	}
+
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		conn, err := listener.Accept()
+		if err == nil {
+			conn.Close()
+		}
+	}()
+
+	flags.EnablePing = true
+	flags.AllowPrivatePingTargets = true
+	flags.AllowedPingTypes = "tcp"
+	flags.AllowedPingTCPPorts = strconv.Itoa(tcpAddr.Port)
+	flags.MaxConcurrentPings = 2
+	flags.PingMinIntervalMillis = 0
+
+	lastAcceptedPingAt = time.Now()
+	capture := &pingResultCapture{}
+	NewPingTask(capture, 10, "tcp", listener.Addr().String())
+
+	if capture.writes != 1 {
+		t.Fatalf("expected one ping result write, got %d", capture.writes)
+	}
+	if got := capture.payload["value"]; got == -1 {
+		t.Fatalf("payload value = %v, want a successful ping result", got)
+	}
+	<-acceptDone
 }
 
 func TestTCPPingUsesLocalListener(t *testing.T) {

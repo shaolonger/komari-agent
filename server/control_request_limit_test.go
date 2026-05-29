@@ -40,3 +40,25 @@ func TestAllowControlRequestRejectsBurstOverLimit(t *testing.T) {
 		t.Fatal("expected control request to be allowed after the window expires")
 	}
 }
+
+func TestShouldRateLimitControlRequestSkipsPingMessages(t *testing.T) {
+	message := controlPlaneMessage{
+		Message:    "ping",
+		PingTaskID: 7,
+		PingType:   "tcp",
+		PingTarget: "127.0.0.1:80",
+	}
+
+	if shouldRateLimitControlRequest(message) {
+		t.Fatal("expected ping messages to bypass the general control-request limiter")
+	}
+}
+
+func TestShouldRateLimitControlRequestStillCoversExecAndTerminal(t *testing.T) {
+	if !shouldRateLimitControlRequest(controlPlaneMessage{Message: "exec", ExecTaskID: "task-1"}) {
+		t.Fatal("expected exec messages to stay behind the control-request limiter")
+	}
+	if !shouldRateLimitControlRequest(controlPlaneMessage{Message: "terminal", TerminalId: "term-1"}) {
+		t.Fatal("expected terminal messages to stay behind the control-request limiter")
+	}
+}
