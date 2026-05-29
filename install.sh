@@ -305,20 +305,34 @@ service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
 github_proxy_trusted=false
-install_version="" # New parameter for specifying version
+install_version=""
 release_repo="shaolonger/komari-agent"
+operation=""
+purge_config=false
+assume_yes=false
+init_system=""
+arch=""
+version_to_install=""
+file_name=""
+download_url=""
+checksum_url=""
+download_tmp_path=""
+checksum_tmp_path=""
+komari_token=""
+komari_args=""
+komari_has_explicit_config=false
+komari_explicit_config_path=""
 original_args=("$@")
+original_arg_count=$#
 
 trap cleanup_staged_installer_copy EXIT
- 
 
 # Detect OS
 os_type=$(uname -s)
 case $os_type in
     Darwin)
         os_name="darwin"
-        target_dir="/usr/local/komari"  # Use /usr/local on macOS
-        # Check if we can write to /usr/local, fallback to user directory
+        target_dir="/usr/local/komari"
         if [ ! -w "/usr/local" ] && [ "$EUID" -ne 0 ]; then
             target_dir="$HOME/.komari"
             log_info "No write permission to /usr/local, using user directory: $target_dir"
@@ -332,7 +346,7 @@ case $os_type in
         ;;
     MINGW*|MSYS*|CYGWIN*)
         os_name="windows"
-        target_dir="/c/komari"  # Use C:\komari on Windows
+        target_dir="/c/komari"
         ;;
     *)
         log_error "Unsupported operating system: $os_type"
@@ -340,207 +354,281 @@ case $os_type in
         ;;
 esac
 
-# Parse install-specific arguments
-komari_token=""
-komari_args=""
-komari_has_explicit_config=false
-komari_explicit_config_path=""
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --install-dir)
-            target_dir="$2"
-            shift 2
-            ;;
-        --install-service-name)
-            service_name="$2"
-            shift 2
-            ;;
-        --install-ghproxy)
-            if [ $# -lt 2 ]; then
-                log_error "Missing value for $1"
-                exit 1
-            fi
-            github_proxy="$2"
-            shift 2
-            ;;
-        --install-ghproxy-trusted)
-            github_proxy_trusted=true
-            shift
-            ;;
-        --install-version)
-            install_version="$2"
-            shift 2
-            ;;
-        --token|-t)
-            if [ $# -lt 2 ]; then
-                log_error "Missing value for $1"
-                exit 1
-            fi
-            komari_token="$2"
-            shift 2
-            ;;
-        --token=*)
-            komari_token="${1#*=}"
-            shift
-            ;;
-        -t=*)
-            komari_token="${1#*=}"
-            shift
-            ;;
-        --config)
-            if [ $# -lt 2 ]; then
-                log_error "Missing value for $1"
-                exit 1
-            fi
-            komari_has_explicit_config=true
-            komari_explicit_config_path="$2"
-            komari_args="$komari_args $1 $2"
-            shift 2
-            ;;
-        --config=*)
-            komari_has_explicit_config=true
-            komari_explicit_config_path="${1#*=}"
-            komari_args="$komari_args $1"
-            shift
-            ;;
-        --install*)
-            log_warning "Unknown install parameter: $1"
-            shift
-            ;;
-        *)
-            # Non-install arguments go to komari_args
-            komari_args="$komari_args $1"
-            shift
-            ;;
-    esac
-done
+show_banner() {
+    echo -e "${WHITE}===========================================${NC}"
+    echo -e "${WHITE}     Komari Agent Management Script      ${NC}"
+    echo -e "${WHITE}===========================================${NC}"
+    echo ""
+}
 
-if [ -n "$komari_token" ] && [ "$komari_has_explicit_config" = true ]; then
-    log_error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
-    exit 1
-fi
+show_usage() {
+    show_banner
+    cat << EOF
+用法:
+  ./install.sh                         打开交互菜单
+  ./install.sh --install [agent flags] 首次安装 Agent
+  ./install.sh --upgrade               升级 Agent 二进制并重启服务
+  ./install.sh --reconfigure [flags]   重建 Agent 配置与服务定义
+  ./install.sh --uninstall             卸载 Agent 服务与二进制
+  ./install.sh --status                查看 Agent 服务状态
+  ./install.sh --logs                  查看 Agent 服务日志
+  ./install.sh --restart               重启 Agent 服务
+  ./install.sh --stop                  停止 Agent 服务
 
-if [ "$komari_has_explicit_config" = true ] && [ ! -f "$komari_explicit_config_path" ]; then
-    log_error "The specified config file does not exist: $komari_explicit_config_path"
-    exit 1
-fi
+常用安装参数:
+  --install-dir PATH
+  --install-service-name NAME
+  --install-version TAG
+  --install-ghproxy URL --install-ghproxy-trusted
+  --purge-config       卸载时额外删除配置文件
+  --yes                跳过卸载确认
 
-if [ -n "$github_proxy" ]; then
-    proxy_validation_output="$(normalize_trusted_github_proxy "$github_proxy" "$github_proxy_trusted" 2>&1)"
-    if [ $? -ne 0 ]; then
-        log_error "$proxy_validation_output"
+常用 Agent 参数:
+  --endpoint URL
+  --token TOKEN
+  --config PATH
+  --enable-ping
+  --max-concurrent-pings N
+  --ping-min-interval-millis N
+
+说明:
+  1. 首次安装/重配会重建服务定义。
+  2. 升级只替换二进制并重启现有服务，不再重建配置。
+  3. 无参数执行时会进入交互式菜单。
+EOF
+}
+
+prompt_yes_no() {
+    local prompt="$1"
+    local default_answer="$2"
+    local answer
+
+    while true; do
+        if [ "$default_answer" = "true" ]; then
+            read -r -p "$prompt [Y/n]: " answer
+            answer=${answer:-Y}
+        else
+            read -r -p "$prompt [y/N]: " answer
+            answer=${answer:-N}
+        fi
+
+        case "$answer" in
+            [Yy]|[Yy][Ee][Ss]) return 0 ;;
+            [Nn]|[Nn][Oo]) return 1 ;;
+            *) log_error "请输入 y 或 n。" ;;
+        esac
+    done
+}
+
+prompt_with_default() {
+    local prompt="$1"
+    local default_value="$2"
+    local answer
+
+    read -r -p "$prompt [$default_value]: " answer
+    printf '%s' "${answer:-$default_value}"
+}
+
+refresh_derived_values() {
+    komari_args="${komari_args# }"
+    komari_agent_path="${target_dir}/agent"
+    komari_config_file="${target_dir}/komari-agent.json"
+    legacy_komari_token_file="${target_dir}/komari-agent.token"
+    komari_service_args="$komari_args"
+    if [ -n "$komari_token" ]; then
+        komari_service_args="$komari_service_args --config $komari_config_file"
+    fi
+    komari_service_args="${komari_service_args# }"
+    komari_service_args_log="$(redact_komari_args "$komari_service_args")"
+    github_proxy_log="$(redact_url_for_log "${github_proxy:-"(direct)"}")"
+}
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --install)
+                operation="install"
+                shift
+                ;;
+            --upgrade)
+                operation="upgrade"
+                shift
+                ;;
+            --reconfigure)
+                operation="reconfigure"
+                shift
+                ;;
+            --uninstall)
+                operation="uninstall"
+                shift
+                ;;
+            --status)
+                operation="status"
+                shift
+                ;;
+            --logs)
+                operation="logs"
+                shift
+                ;;
+            --restart)
+                operation="restart"
+                shift
+                ;;
+            --stop)
+                operation="stop"
+                shift
+                ;;
+            --menu)
+                operation="menu"
+                shift
+                ;;
+            --help|-h)
+                operation="help"
+                shift
+                ;;
+            --yes|-y)
+                assume_yes=true
+                shift
+                ;;
+            --purge-config)
+                purge_config=true
+                shift
+                ;;
+            --install-dir)
+                target_dir="$2"
+                shift 2
+                ;;
+            --install-service-name)
+                service_name="$2"
+                shift 2
+                ;;
+            --install-ghproxy)
+                if [ $# -lt 2 ]; then
+                    log_error "Missing value for $1"
+                    exit 1
+                fi
+                github_proxy="$2"
+                shift 2
+                ;;
+            --install-ghproxy-trusted)
+                github_proxy_trusted=true
+                shift
+                ;;
+            --install-version)
+                install_version="$2"
+                shift 2
+                ;;
+            --token|-t)
+                if [ $# -lt 2 ]; then
+                    log_error "Missing value for $1"
+                    exit 1
+                fi
+                komari_token="$2"
+                shift 2
+                ;;
+            --token=*)
+                komari_token="${1#*=}"
+                shift
+                ;;
+            -t=*)
+                komari_token="${1#*=}"
+                shift
+                ;;
+            --config)
+                if [ $# -lt 2 ]; then
+                    log_error "Missing value for $1"
+                    exit 1
+                fi
+                komari_has_explicit_config=true
+                komari_explicit_config_path="$2"
+                komari_args="$komari_args $1 $2"
+                shift 2
+                ;;
+            --config=*)
+                komari_has_explicit_config=true
+                komari_explicit_config_path="${1#*=}"
+                komari_args="$komari_args $1"
+                shift
+                ;;
+            --install*)
+                log_warning "Unknown install parameter: $1"
+                shift
+                ;;
+            *)
+                komari_args="$komari_args $1"
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$operation" ]; then
+        if [ "$original_arg_count" -eq 0 ]; then
+            operation="menu"
+        else
+            operation="install"
+        fi
+    fi
+}
+
+validate_argument_state() {
+    if [ -n "$komari_token" ] && [ "$komari_has_explicit_config" = true ]; then
+        log_error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
         exit 1
     fi
-    github_proxy="$proxy_validation_output"
-    log_warning "Using --install-ghproxy only with an organization-controlled HTTPS proxy that mirrors GitHub release binaries and .sha256 assets without modification."
-fi
 
-# Remove leading space from komari_args if present
-komari_args="${komari_args# }"
+    if [ -n "$github_proxy" ]; then
+        proxy_validation_output="$(normalize_trusted_github_proxy "$github_proxy" "$github_proxy_trusted" 2>&1)"
+        if [ $? -ne 0 ]; then
+            log_error "$proxy_validation_output"
+            exit 1
+        fi
+        github_proxy="$proxy_validation_output"
+        log_warning "Using --install-ghproxy only with an organization-controlled HTTPS proxy that mirrors GitHub release binaries and .sha256 assets without modification."
+    fi
 
-komari_agent_path="${target_dir}/agent"
-komari_config_file="${target_dir}/komari-agent.json"
-legacy_komari_token_file="${target_dir}/komari-agent.token"
-komari_service_args="$komari_args"
-if [ -n "$komari_token" ]; then
-    komari_service_args="$komari_service_args --config $komari_config_file"
-fi
-komari_service_args="${komari_service_args# }"
-komari_service_args_log="$(redact_komari_args "$komari_service_args")"
-github_proxy_log="$(redact_url_for_log "${github_proxy:-"(direct)"}")"
+    refresh_derived_values
+}
+
+operation_needs_root() {
+    [ "$operation" != "help" ]
+}
 
 # macOS doesn't always require sudo for everything
 if [ "$os_name" = "darwin" ] && command -v brew >/dev/null 2>&1; then
-    # On macOS with Homebrew, we can run without root for dependencies
     require_root_for_deps=false
 else
     require_root_for_deps=true
 fi
 
-if [ "$EUID" -ne 0 ] && [ "$require_root_for_deps" = true ]; then
+parse_arguments "$@"
+validate_argument_state
+
+if [ "$EUID" -ne 0 ] && [ "$require_root_for_deps" = true ] && operation_needs_root; then
     reexec_with_sudo
 fi
 
-echo -e "${WHITE}===========================================${NC}"
-echo -e "${WHITE}    Komari Agent Installation Script     ${NC}"
-echo -e "${WHITE}===========================================${NC}"
-echo ""
-log_config "Installation configuration:"
-log_config "  Service name: ${GREEN}$service_name${NC}"
-log_config "  Install directory: ${GREEN}$target_dir${NC}"
-log_config "  GitHub proxy: ${GREEN}$github_proxy_log${NC}"
-log_config "  Binary arguments: ${GREEN}$komari_service_args_log${NC}"
-if [ -n "$komari_token" ]; then
-    log_config "  Config file: ${GREEN}$komari_config_file${NC}"
-elif [ "$komari_has_explicit_config" = true ]; then
-    log_config "  Config file: ${GREEN}$komari_explicit_config_path${NC}"
-fi
-if [ -n "$install_version" ]; then
-    log_config "  Specified agent version: ${GREEN}$install_version${NC}"
-else
-    log_config "  Agent version: ${GREEN}Latest${NC}"
-fi
-echo ""
-
-# Function to uninstall the previous installation
-uninstall_previous() {
-    log_step "Checking for previous installation..."
-    
-    # Stop and disable service if it exists
-    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "${service_name}.service"; then
-        log_info "Stopping and disabling existing systemd service..."
-        systemctl stop ${service_name}.service
-        systemctl disable ${service_name}.service
-        rm -f "/etc/systemd/system/${service_name}.service"
-        systemctl daemon-reload
-    elif command -v rc-service >/dev/null 2>&1 && [ -f "/etc/init.d/${service_name}" ]; then
-        log_info "Stopping and disabling existing OpenRC service..."
-        rc-service ${service_name} stop
-        rc-update del ${service_name} default
-        rm -f "/etc/init.d/${service_name}"
-    elif command -v uci >/dev/null 2>&1 && [ -f "/etc/init.d/${service_name}" ]; then
-        log_info "Stopping and disabling existing procd service..."
-        /etc/init.d/${service_name} stop
-        /etc/init.d/${service_name} disable
-        rm -f "/etc/init.d/${service_name}"
-    elif command -v initctl >/dev/null 2>&1 && [ -f "/etc/init/${service_name}.conf" ]; then
-        log_info "Stopping and removing existing upstart service..."
-        initctl stop ${service_name}
-        rm -f "/etc/init/${service_name}.conf"
-    elif [ "$os_name" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
-        # macOS launchd service - check both system and user locations
-        system_plist="/Library/LaunchDaemons/com.komari.${service_name}.plist"
-        user_plist="$HOME/Library/LaunchAgents/com.komari.${service_name}.plist"
-        
-        if [ -f "$system_plist" ]; then
-            log_info "Stopping and removing existing system launchd service..."
-            launchctl bootout system "$system_plist" 2>/dev/null || true
-            rm -f "$system_plist"
-        fi
-        
-        if [ -f "$user_plist" ]; then
-            log_info "Stopping and removing existing user launchd service..."
-            launchctl bootout gui/$(id -u) "$user_plist" 2>/dev/null || true
-            rm -f "$user_plist"
-        fi
+show_operation_configuration() {
+    local heading="$1"
+    show_banner
+    log_config "$heading"
+    log_config "  Service name: ${GREEN}$service_name${NC}"
+    log_config "  Install directory: ${GREEN}$target_dir${NC}"
+    log_config "  GitHub proxy: ${GREEN}$github_proxy_log${NC}"
+    if [ -n "$komari_service_args_log" ]; then
+        log_config "  Agent arguments: ${GREEN}$komari_service_args_log${NC}"
     fi
-    
-    if [ -f "$komari_agent_path" ]; then
-        log_info "Existing binary will be replaced after checksum verification."
+    if [ -n "$komari_token" ]; then
+        log_config "  Config file: ${GREEN}$komari_config_file${NC}"
+    elif [ "$komari_has_explicit_config" = true ]; then
+        log_config "  Config file: ${GREEN}$komari_explicit_config_path${NC}"
     fi
-
-    if [ -f "$komari_config_file" ]; then
-        log_info "Preserving existing config file: $komari_config_file"
+    if [ -n "$install_version" ]; then
+        log_config "  Target version: ${GREEN}$install_version${NC}"
+    else
+        log_config "  Target version: ${GREEN}Latest${NC}"
     fi
-
-    if [ -f "$legacy_komari_token_file" ]; then
-        log_info "Removing old token file..."
-        rm -f "$legacy_komari_token_file"
-    fi
+    echo ""
 }
-
-# Uninstall previous installation
-uninstall_previous
 
 install_dependencies() {
     log_step "Checking and installing dependencies..."
@@ -548,13 +636,12 @@ install_dependencies() {
     local deps="curl"
     local missing_deps=""
     for cmd in $deps; do
-        if ! command -v $cmd >/dev/null 2>&1; then
+        if ! command -v "$cmd" >/dev/null 2>&1; then
             missing_deps="$missing_deps $cmd"
         fi
     done
 
     if [ -n "$missing_deps" ]; then
-        # Check package manager and install dependencies
         if command -v apt >/dev/null 2>&1; then
             log_info "Using apt to install dependencies..."
             apt update
@@ -570,14 +657,13 @@ install_dependencies() {
             brew install $missing_deps
         else
             log_error "No supported package manager found (apt/yum/apk/brew)"
-            exit 1
+            return 1
         fi
-        
-        # Verify installation
+
         for cmd in $missing_deps; do
-            if ! command -v $cmd >/dev/null 2>&1; then
+            if ! command -v "$cmd" >/dev/null 2>&1; then
                 log_error "Failed to install $cmd"
-                exit 1
+                return 1
             fi
         done
         log_success "Dependencies installed successfully"
@@ -586,248 +672,429 @@ install_dependencies() {
     fi
 }
 
- 
-# Install dependencies
-install_dependencies
+resolve_architecture() {
+    local machine_arch
+    machine_arch=$(uname -m)
+    case $machine_arch in
+        x86_64)
+            arch="amd64"
+            ;;
+        aarch64|arm64)
+            arch="arm64"
+            ;;
+        i386|i686)
+            case $os_name in
+                freebsd|linux|windows) arch="386" ;;
+                *) log_error "32-bit x86 architecture not supported on $os_name"; return 1 ;;
+            esac
+            ;;
+        armv7*|armv6*)
+            case $os_name in
+                freebsd|linux) arch="arm" ;;
+                *) log_error "32-bit ARM architecture not supported on $os_name"; return 1 ;;
+            esac
+            ;;
+        *)
+            log_error "Unsupported architecture: $machine_arch on $os_name"
+            return 1
+            ;;
+    esac
+    log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
+}
 
- 
+prepare_download_context() {
+    install_dependencies || return 1
+    resolve_architecture || return 1
+    version_to_install=""
+    resolve_release_version || return 1
 
-# Architecture detection with platform-specific support
-arch=$(uname -m)
-case $arch in
-    x86_64)
-        arch="amd64"
-        ;;
-    aarch64|arm64)
-        arch="arm64"
-        ;;
-    i386|i686)
-        # x86 (32-bit) support
-        case $os_name in
-            freebsd|linux|windows)
-                arch="386"
-                ;;
-            *)
-                log_error "32-bit x86 architecture not supported on $os_name"
-                exit 1
-                ;;
-        esac
-        ;;
-    armv7*|armv6*)
-        # ARM 32-bit support
-        case $os_name in
-            freebsd|linux)
-                arch="arm"
-                ;;
-            *)
-                log_error "32-bit ARM architecture not supported on $os_name"
-                exit 1
-                ;;
-        esac
-        ;;
-    *)
-        log_error "Unsupported architecture: $arch on $os_name"
-        exit 1
-        ;;
-esac
-log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
-
-version_to_install=""
-resolve_release_version
-
-# Construct download URL
-file_name="komari-agent-${os_name}-${arch}"
-download_path="download/${version_to_install}"
-
-if [ -n "$github_proxy" ]; then
-    # Use proxy for GitHub releases
-    download_url="${github_proxy}/https://github.com/shaolonger/komari-agent/releases/${download_path}/${file_name}"
-else
-    # Direct access to GitHub releases
-    download_url="https://github.com/shaolonger/komari-agent/releases/${download_path}/${file_name}"
-fi
-
-checksum_url="${download_url}.sha256"
-download_tmp_path="${komari_agent_path}.download.$$"
-checksum_tmp_path="${download_tmp_path}.sha256"
-
-log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
-mkdir -p "$target_dir"
-
-# Download binary
-if [ -n "$github_proxy" ]; then
-    log_step "Downloading $file_name via proxy..."
-    log_info "URL: ${CYAN}$(redact_url_for_log "$download_url")${NC}"
-else
-    log_step "Downloading $file_name directly..."
-    log_info "URL: ${CYAN}$(redact_url_for_log "$download_url")${NC}"
-fi
-if ! curl -fL -o "$download_tmp_path" "$download_url"; then
-    rm -f "$download_tmp_path" "$checksum_tmp_path"
-    log_error "Download failed. Ensure ${release_repo} release ${version_to_install} includes ${file_name}."
-    exit 1
-fi
-
-log_step "Downloading SHA256 checksum for $file_name..."
-log_info "URL: ${CYAN}$(redact_url_for_log "$checksum_url")${NC}"
-if ! curl -fL -o "$checksum_tmp_path" "$checksum_url"; then
-    rm -f "$download_tmp_path" "$checksum_tmp_path"
-    log_error "Checksum download failed. Ensure ${release_repo} release ${version_to_install} includes ${file_name}.sha256."
-    exit 1
-fi
-
-log_step "Verifying SHA256 checksum..."
-if ! verify_release_checksum "$download_tmp_path" "$checksum_tmp_path"; then
-    rm -f "$download_tmp_path" "$checksum_tmp_path"
-    log_error "Checksum verification failed"
-    exit 1
-fi
-
-# Set executable permissions and replace the target only after verification succeeds
-if ! chmod +x "$download_tmp_path"; then
-    rm -f "$download_tmp_path" "$checksum_tmp_path"
-    log_error "Failed to set executable permissions on the downloaded binary"
-    exit 1
-fi
-
-if ! mv -f "$download_tmp_path" "$komari_agent_path"; then
-    rm -f "$download_tmp_path" "$checksum_tmp_path"
-    log_error "Failed to replace the installed binary"
-    exit 1
-fi
-
-rm -f "$checksum_tmp_path"
-log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
-
-if [ -n "$komari_token" ]; then
-    log_step "Writing service config file..."
-    if ! write_komari_config_file "$komari_config_file"; then
-        log_error "Failed to write config file: $komari_config_file"
-        exit 1
+    file_name="komari-agent-${os_name}-${arch}"
+    if [ -n "$github_proxy" ]; then
+        download_url="${github_proxy}/https://github.com/shaolonger/komari-agent/releases/download/${version_to_install}/${file_name}"
+    else
+        download_url="https://github.com/shaolonger/komari-agent/releases/download/${version_to_install}/${file_name}"
     fi
-    log_success "Service config stored at ${GREEN}$komari_config_file${NC}"
-fi
+    checksum_url="${download_url}.sha256"
+    download_tmp_path="${komari_agent_path}.download.$$"
+    checksum_tmp_path="${download_tmp_path}.sha256"
+    mkdir -p "$target_dir"
+}
 
-# Detect init system and configure service
-log_step "Configuring system service..."
+download_release_binary() {
+    if [ -n "$github_proxy" ]; then
+        log_step "Downloading $file_name via proxy..."
+    else
+        log_step "Downloading $file_name directly..."
+    fi
+    log_info "URL: ${CYAN}$(redact_url_for_log "$download_url")${NC}"
+    if ! curl -fL -o "$download_tmp_path" "$download_url"; then
+        rm -f "$download_tmp_path" "$checksum_tmp_path"
+        log_error "Download failed. Ensure ${release_repo} release ${version_to_install} includes ${file_name}."
+        return 1
+    fi
 
-# Function to detect actual init system
+    log_step "Downloading SHA256 checksum for $file_name..."
+    log_info "URL: ${CYAN}$(redact_url_for_log "$checksum_url")${NC}"
+    if ! curl -fL -o "$checksum_tmp_path" "$checksum_url"; then
+        rm -f "$download_tmp_path" "$checksum_tmp_path"
+        log_error "Checksum download failed. Ensure ${release_repo} release ${version_to_install} includes ${file_name}.sha256."
+        return 1
+    fi
+
+    log_step "Verifying SHA256 checksum..."
+    if ! verify_release_checksum "$download_tmp_path" "$checksum_tmp_path"; then
+        rm -f "$download_tmp_path" "$checksum_tmp_path"
+        log_error "Checksum verification failed"
+        return 1
+    fi
+
+    if ! chmod +x "$download_tmp_path"; then
+        rm -f "$download_tmp_path" "$checksum_tmp_path"
+        log_error "Failed to set executable permissions on the downloaded binary"
+        return 1
+    fi
+}
+
+replace_downloaded_binary() {
+    if ! mv -f "$download_tmp_path" "$komari_agent_path"; then
+        rm -f "$download_tmp_path" "$checksum_tmp_path"
+        log_error "Failed to replace the installed binary"
+        return 1
+    fi
+    rm -f "$checksum_tmp_path"
+    log_success "Komari-agent binary updated at ${GREEN}$komari_agent_path${NC}"
+}
+
+has_endpoint_arg() {
+    case " $komari_args " in
+        *" --endpoint "*|*" -e "*|*" --endpoint="*|*" -e="*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+config_has_endpoint() {
+    local config_path="$1"
+    grep -Eq '"endpoint"[[:space:]]*:' "$config_path"
+}
+
+ensure_install_inputs() {
+    if [ -n "$komari_token" ] && ! has_endpoint_arg; then
+        log_error "When generating a config from --token, you must also provide --endpoint."
+        return 1
+    fi
+
+    if [ "$komari_has_explicit_config" = true ]; then
+        if [ ! -f "$komari_explicit_config_path" ]; then
+            log_error "The specified config file does not exist: $komari_explicit_config_path"
+            return 1
+        fi
+        if ! has_endpoint_arg && ! config_has_endpoint "$komari_explicit_config_path"; then
+            log_error "The selected config file does not contain an endpoint, and no --endpoint flag was provided."
+            return 1
+        fi
+        return 0
+    fi
+
+    if [ -n "$komari_token" ]; then
+        return 0
+    fi
+
+    if [ -f "$komari_config_file" ]; then
+        komari_has_explicit_config=true
+        komari_explicit_config_path="$komari_config_file"
+        komari_args="$komari_args --config $komari_config_file"
+        refresh_derived_values
+        if ! has_endpoint_arg && ! config_has_endpoint "$komari_config_file"; then
+            log_error "The default config file does not contain an endpoint, and no --endpoint flag was provided."
+            return 1
+        fi
+        return 0
+    fi
+
+    log_error "No usable agent config was found. Provide --config, or provide --endpoint with --token, or use the interactive install menu."
+    return 1
+}
+
+write_generated_config_if_needed() {
+    if [ -n "$komari_token" ]; then
+        log_step "Writing service config file..."
+        if ! write_komari_config_file "$komari_config_file"; then
+            log_error "Failed to write config file: $komari_config_file"
+            return 1
+        fi
+        log_success "Service config stored at ${GREEN}$komari_config_file${NC}"
+    fi
+}
+
 detect_init_system() {
-    # Check if running on NixOS (special case)
     if [ -f /etc/NIXOS ]; then
         echo "nixos"
         return
     fi
-    
-    # Alpine Linux MUST be checked first
-    # Alpine always uses OpenRC, even in containers where PID 1 might be different
+
     if [ -f /etc/alpine-release ]; then
         if command -v rc-service >/dev/null 2>&1 || [ -f /sbin/openrc-run ]; then
             echo "openrc"
             return
         fi
     fi
-    
-    # Get PID 1 process for other detection
-    local pid1_process=$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')
-    
-    # If PID 1 is systemd, use systemd
+
+    local pid1_process
+    pid1_process=$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')
+
     if [ "$pid1_process" = "systemd" ] || [ -d /run/systemd/system ]; then
-        if command -v systemctl >/dev/null 2>&1; then
-            # Additional verification that systemd is actually functioning
-            if systemctl list-units >/dev/null 2>&1; then
-                echo "systemd"
-                return
-            fi
+        if command -v systemctl >/dev/null 2>&1 && systemctl list-units >/dev/null 2>&1; then
+            echo "systemd"
+            return
         fi
     fi
-    
-    # Check for Gentoo OpenRC (PID 1 is openrc-init)
+
     if [ "$pid1_process" = "openrc-init" ]; then
         if command -v rc-service >/dev/null 2>&1; then
             echo "openrc"
             return
         fi
     fi
-    
-    # Check for other OpenRC systems (not Alpine, already handled)
-    # Some systems use traditional init with OpenRC
+
     if [ "$pid1_process" = "init" ] && [ ! -f /etc/alpine-release ]; then
-        # Check if OpenRC is actually managing services
         if [ -d /run/openrc ] && command -v rc-service >/dev/null 2>&1; then
             echo "openrc"
             return
         fi
-        # Check for OpenRC files
         if [ -f /sbin/openrc ] && command -v rc-service >/dev/null 2>&1; then
             echo "openrc"
             return
         fi
     fi
-    
-    # Check for OpenWrt's procd
+
     if command -v uci >/dev/null 2>&1 && [ -f /etc/rc.common ]; then
         echo "procd"
         return
     fi
-    
-    # Check for macOS launchd
+
     if [ "$os_name" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
         echo "launchd"
         return
     fi
-    
-    # Fallback: if systemctl exists and appears functional, assume systemd
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl list-units >/dev/null 2>&1; then
-            echo "systemd"
-            return
-        fi
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-units >/dev/null 2>&1; then
+        echo "systemd"
+        return
     fi
-    
-    # Last resort: check for OpenRC without other indicators
+
     if command -v rc-service >/dev/null 2>&1 && [ -d /etc/init.d ]; then
         echo "openrc"
         return
     fi
 
-    # check for Upstart (CentOS 6)
     if command -v initctl >/dev/null 2>&1 && [ -d /etc/init ]; then
         echo "upstart"
         return
     fi
-    
+
     echo "unknown"
 }
 
-init_system=$(detect_init_system)
-log_info "Detected init system: ${GREEN}$init_system${NC}"
+ensure_init_system_detected() {
+    if [ -z "$init_system" ]; then
+        init_system=$(detect_init_system)
+        log_info "Detected init system: ${GREEN}$init_system${NC}"
+    fi
+}
 
-# Handle each init system
-if [ "$init_system" = "nixos" ]; then
-    log_warning "NixOS detected. System services must be configured declaratively."
-    log_info "Please add the following to your NixOS configuration:"
-    echo ""
-    echo -e "${CYAN}systemd.services.${service_name} = {${NC}"
-    echo -e "${CYAN}  description = \"Komari Agent Service\";${NC}"
-    echo -e "${CYAN}  after = [ \"network.target\" ];${NC}"
-    echo -e "${CYAN}  wantedBy = [ \"multi-user.target\" ];${NC}"
-    echo -e "${CYAN}  serviceConfig = {${NC}"
-    echo -e "${CYAN}    Type = \"simple\";${NC}"
-    echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${komari_service_args_log}\";${NC}"
-    echo -e "${CYAN}    WorkingDirectory = \"${target_dir}\";${NC}"
-    echo -e "${CYAN}    Restart = \"always\";${NC}"
-    echo -e "${CYAN}    User = \"root\";${NC}"
-    echo -e "${CYAN}  };${NC}"
-    echo -e "${CYAN}};${NC}"
-    echo ""
-    log_info "Then run: sudo nixos-rebuild switch"
-    log_warning "Service not started automatically on NixOS. Please rebuild your configuration."
-elif [ "$init_system" = "openrc" ]; then
-    # OpenRC service configuration
-    log_info "Using OpenRC for service management"
-    service_file="/etc/init.d/${service_name}"
-    cat > "$service_file" << EOF
+launchd_system_plist() {
+    printf '/Library/LaunchDaemons/com.komari.%s.plist' "$service_name"
+}
+
+launchd_user_plist() {
+    printf '%s/Library/LaunchAgents/com.komari.%s.plist' "$HOME" "$service_name"
+}
+
+service_exists() {
+    ensure_init_system_detected
+    case "$init_system" in
+        systemd)
+            systemctl list-unit-files | grep -Fq "${service_name}.service"
+            ;;
+        openrc|procd)
+            [ -f "/etc/init.d/${service_name}" ]
+            ;;
+        upstart)
+            [ -f "/etc/init/${service_name}.conf" ]
+            ;;
+        launchd)
+            [ -f "$(launchd_system_plist)" ] || [ -f "$(launchd_user_plist)" ]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+stop_registered_service() {
+    ensure_init_system_detected
+    case "$init_system" in
+        systemd)
+            systemctl stop ${service_name}.service >/dev/null 2>&1 || true
+            ;;
+        openrc)
+            rc-service ${service_name} stop >/dev/null 2>&1 || true
+            ;;
+        procd)
+            /etc/init.d/${service_name} stop >/dev/null 2>&1 || true
+            ;;
+        upstart)
+            initctl stop ${service_name} >/dev/null 2>&1 || true
+            ;;
+        launchd)
+            if [ -f "$(launchd_system_plist)" ]; then
+                launchctl bootout system "$(launchd_system_plist)" >/dev/null 2>&1 || true
+            fi
+            if [ -f "$(launchd_user_plist)" ]; then
+                launchctl bootout gui/$(id -u) "$(launchd_user_plist)" >/dev/null 2>&1 || true
+            fi
+            ;;
+        *)
+            ;;
+    esac
+}
+
+start_registered_service() {
+    ensure_init_system_detected
+    case "$init_system" in
+        systemd)
+            systemctl start ${service_name}.service
+            ;;
+        openrc)
+            rc-service ${service_name} start
+            ;;
+        procd)
+            /etc/init.d/${service_name} start
+            ;;
+        upstart)
+            initctl start ${service_name}
+            ;;
+        launchd)
+            if [ -f "$(launchd_system_plist)" ]; then
+                launchctl bootstrap system "$(launchd_system_plist)"
+            elif [ -f "$(launchd_user_plist)" ]; then
+                launchctl bootstrap gui/$(id -u) "$(launchd_user_plist)"
+            else
+                log_error "Launchd plist not found for ${service_name}"
+                return 1
+            fi
+            ;;
+        *)
+            log_error "Unsupported or unknown init system detected: $init_system"
+            return 1
+            ;;
+    esac
+}
+
+restart_registered_service() {
+    ensure_init_system_detected
+    case "$init_system" in
+        systemd)
+            systemctl restart ${service_name}.service
+            ;;
+        openrc)
+            rc-service ${service_name} restart
+            ;;
+        procd)
+            /etc/init.d/${service_name} restart
+            ;;
+        upstart)
+            initctl restart ${service_name}
+            ;;
+        launchd)
+            stop_registered_service
+            start_registered_service
+            ;;
+        *)
+            log_error "Unsupported or unknown init system detected: $init_system"
+            return 1
+            ;;
+    esac
+}
+
+remove_service_registration() {
+    ensure_init_system_detected
+    case "$init_system" in
+        systemd)
+            if systemctl list-unit-files | grep -Fq "${service_name}.service"; then
+                systemctl stop ${service_name}.service >/dev/null 2>&1 || true
+                systemctl disable ${service_name}.service >/dev/null 2>&1 || true
+                rm -f "/etc/systemd/system/${service_name}.service"
+                systemctl daemon-reload
+            fi
+            ;;
+        openrc)
+            if [ -f "/etc/init.d/${service_name}" ]; then
+                rc-service ${service_name} stop >/dev/null 2>&1 || true
+                rc-update del ${service_name} default >/dev/null 2>&1 || true
+                rm -f "/etc/init.d/${service_name}"
+            fi
+            ;;
+        procd)
+            if [ -f "/etc/init.d/${service_name}" ]; then
+                /etc/init.d/${service_name} stop >/dev/null 2>&1 || true
+                /etc/init.d/${service_name} disable >/dev/null 2>&1 || true
+                rm -f "/etc/init.d/${service_name}"
+            fi
+            ;;
+        upstart)
+            if [ -f "/etc/init/${service_name}.conf" ]; then
+                initctl stop ${service_name} >/dev/null 2>&1 || true
+                rm -f "/etc/init/${service_name}.conf"
+            fi
+            ;;
+        launchd)
+            if [ -f "$(launchd_system_plist)" ]; then
+                launchctl bootout system "$(launchd_system_plist)" >/dev/null 2>&1 || true
+                rm -f "$(launchd_system_plist)"
+            fi
+            if [ -f "$(launchd_user_plist)" ]; then
+                launchctl bootout gui/$(id -u) "$(launchd_user_plist)" >/dev/null 2>&1 || true
+                rm -f "$(launchd_user_plist)"
+            fi
+            ;;
+        nixos)
+            log_warning "NixOS detected. Please remove the declarative service from your NixOS configuration manually."
+            ;;
+        *)
+            ;;
+    esac
+}
+
+configure_service() {
+    ensure_init_system_detected
+    log_step "Configuring system service..."
+
+    case "$init_system" in
+        nixos)
+            log_warning "NixOS detected. System services must be configured declaratively."
+            log_info "Please add the following to your NixOS configuration:"
+            echo ""
+            echo -e "${CYAN}systemd.services.${service_name} = {${NC}"
+            echo -e "${CYAN}  description = \"Komari Agent Service\";${NC}"
+            echo -e "${CYAN}  after = [ \"network.target\" ];${NC}"
+            echo -e "${CYAN}  wantedBy = [ \"multi-user.target\" ];${NC}"
+            echo -e "${CYAN}  serviceConfig = {${NC}"
+            echo -e "${CYAN}    Type = \"simple\";${NC}"
+            echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${komari_service_args_log}\";${NC}"
+            echo -e "${CYAN}    WorkingDirectory = \"${target_dir}\";${NC}"
+            echo -e "${CYAN}    Restart = \"always\";${NC}"
+            echo -e "${CYAN}    User = \"root\";${NC}"
+            echo -e "${CYAN}  };${NC}"
+            echo -e "${CYAN}};${NC}"
+            echo ""
+            log_info "Then run: sudo nixos-rebuild switch"
+            ;;
+        openrc)
+            local service_file="/etc/init.d/${service_name}"
+            cat > "$service_file" << EOF
 #!/sbin/openrc-run
 
 name="Komari Agent Service"
@@ -845,17 +1112,13 @@ depend() {
     after network
 }
 EOF
-
-    # Set permissions and enable service
-    chmod +x "$service_file"
-    rc-update add ${service_name} default
-    rc-service ${service_name} start
-    log_success "OpenRC service configured and started"
-elif [ "$init_system" = "systemd" ]; then
-    # Systemd service configuration
-    log_info "Using systemd for service management"
-    service_file="/etc/systemd/system/${service_name}.service"
-    cat > "$service_file" << EOF
+            chmod +x "$service_file"
+            rc-update add ${service_name} default >/dev/null 2>&1 || true
+            start_registered_service
+            ;;
+        systemd)
+            local service_file="/etc/systemd/system/${service_name}.service"
+            cat > "$service_file" << EOF
 [Unit]
 Description=Komari Agent Service
 After=network.target
@@ -870,17 +1133,13 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    # Reload systemd and start service
-    systemctl daemon-reload
-    systemctl enable ${service_name}.service
-    systemctl start ${service_name}.service
-    log_success "Systemd service configured and started"
-elif [ "$init_system" = "procd" ]; then
-    # procd service configuration (OpenWrt)
-    log_info "Using procd for service management"
-    service_file="/etc/init.d/${service_name}"
-    cat > "$service_file" << EOF
+            systemctl daemon-reload
+            systemctl enable ${service_name}.service >/dev/null 2>&1 || true
+            start_registered_service
+            ;;
+        procd)
+            local service_file="/etc/init.d/${service_name}"
+            cat > "$service_file" << EOF
 #!/bin/sh /etc/rc.common
 
 START=99
@@ -910,36 +1169,25 @@ reload_service() {
     start
 }
 EOF
-
-    # Set permissions and enable service
-    chmod +x "$service_file"
-    /etc/init.d/${service_name} enable
-    /etc/init.d/${service_name} start
-    log_success "procd service configured and started"
-elif [ "$init_system" = "launchd" ]; then
-    # macOS launchd service configuration
-    log_info "Using launchd for service management"
-    
-    # Determine if this should be a system or user service based on installation directory
-    if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
-        # User-level service (LaunchAgent)
-        plist_dir="$HOME/Library/LaunchAgents"
-        plist_file="$plist_dir/com.komari.${service_name}.plist"
-        log_info "Installing as user-level service (LaunchAgent)"
-        mkdir -p "$plist_dir"
-        service_user="$(whoami)"
-        log_dir="$HOME/Library/Logs"
-    else
-        # System-level service (LaunchDaemon)
-        plist_dir="/Library/LaunchDaemons"
-        plist_file="$plist_dir/com.komari.${service_name}.plist"
-        log_info "Installing as system-level service (LaunchDaemon)"
-        service_user="root"
-        log_dir="/var/log"
-    fi
-    
-    # Create the launchd plist file
-    cat > "$plist_file" << EOF
+            chmod +x "$service_file"
+            /etc/init.d/${service_name} enable >/dev/null 2>&1 || true
+            start_registered_service
+            ;;
+        launchd)
+            local plist_dir plist_file service_user log_dir
+            if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
+                plist_dir="$HOME/Library/LaunchAgents"
+                plist_file="$plist_dir/com.komari.${service_name}.plist"
+                service_user="$(whoami)"
+                log_dir="$HOME/Library/Logs"
+            else
+                plist_dir="/Library/LaunchDaemons"
+                plist_file="$plist_dir/com.komari.${service_name}.plist"
+                service_user="root"
+                log_dir="/var/log"
+            fi
+            mkdir -p "$plist_dir"
+            cat > "$plist_file" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -950,13 +1198,10 @@ elif [ "$init_system" = "launchd" ]; then
     <array>
         <string>${komari_agent_path}</string>
 EOF
-    
-    # Add program arguments if provided
-    if [ -n "$komari_service_args" ]; then
-        echo "$komari_service_args" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
-    fi
-    
-    cat >> "$plist_file" << EOF
+            if [ -n "$komari_service_args" ]; then
+                echo "$komari_service_args" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
+            fi
+            cat >> "$plist_file" << EOF
     </array>
     <key>WorkingDirectory</key>
     <string>${target_dir}</string>
@@ -973,30 +1218,11 @@ EOF
 </dict>
 </plist>
 EOF
-    
-    # Load and start the service
-    if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
-        # User-level service
-        if launchctl bootstrap gui/$(id -u) "$plist_file"; then
-            log_success "User-level launchd service configured and started"
-        else
-            log_error "Failed to load user-level launchd service"
-            exit 1
-        fi
-    else
-        # System-level service
-        if launchctl bootstrap system "$plist_file"; then
-            log_success "System-level launchd service configured and started"
-        else
-            log_error "Failed to load system-level launchd service"
-            exit 1
-        fi
-    fi
-elif [ "$init_system" = "upstart" ]; then
-    # Upstart service configuration
-    log_info "Using upstart for service management"
-    service_file="/etc/init/${service_name}.conf"
-    cat > "$service_file" << EOF
+            start_registered_service
+            ;;
+        upstart)
+            local service_file="/etc/init/${service_name}.conf"
+            cat > "$service_file" << EOF
 # KOMARI Agent
 description "Komari Agent Service"
 
@@ -1014,30 +1240,389 @@ pre-start script
     test -x ${komari_agent_path} || { stop; exit 0; }
 end script
 
-# Start
 script
     exec ${komari_agent_path} ${komari_service_args}
 end script
 EOF
-    # enable Upstart unit
-    initctl reload-configuration
-    initctl start ${service_name}
-    log_success "Upstart service configured and started"
-else
-    log_error "Unsupported or unknown init system detected: $init_system"
-    log_error "Supported init systems: systemd, openrc, procd, launchd"
-    exit 1
-fi
+            initctl reload-configuration
+            start_registered_service
+            ;;
+        *)
+            log_error "Unsupported or unknown init system detected: $init_system"
+            return 1
+            ;;
+    esac
 
-echo ""
-echo -e "${WHITE}===========================================${NC}"
-if [ -f /etc/NIXOS ]; then
-    log_success "Komari-agent binary installed!"
-    log_warning "NixOS requires declarative service configuration."
-    log_info "Please add the service configuration to your NixOS config and rebuild."
-else
+    log_success "Service configuration updated for ${GREEN}$service_name${NC}"
+}
+
+show_status() {
+    ensure_init_system_detected
+    case "$init_system" in
+        systemd)
+            systemctl status ${service_name}.service --no-pager
+            ;;
+        openrc)
+            rc-service ${service_name} status
+            ;;
+        procd)
+            /etc/init.d/${service_name} status
+            ;;
+        upstart)
+            initctl status ${service_name}
+            ;;
+        launchd)
+            if [ -f "$(launchd_system_plist)" ]; then
+                launchctl print system/com.komari.${service_name}
+            elif [ -f "$(launchd_user_plist)" ]; then
+                launchctl print gui/$(id -u)/com.komari.${service_name}
+            else
+                log_error "Launchd plist not found for ${service_name}"
+                return 1
+            fi
+            ;;
+        nixos)
+            systemctl status ${service_name}.service --no-pager || true
+            ;;
+        *)
+            log_error "Unsupported or unknown init system detected: $init_system"
+            return 1
+            ;;
+    esac
+}
+
+show_logs() {
+    ensure_init_system_detected
+    case "$init_system" in
+        systemd)
+            journalctl -u ${service_name} -n 100 -f
+            ;;
+        openrc)
+            log_warning "OpenRC environments do not have a single standard service log path. Check your system log (for example /var/log/messages)."
+            ;;
+        procd)
+            if command -v logread >/dev/null 2>&1; then
+                logread -f
+            else
+                log_warning "logread is unavailable on this host. Check the system log manually."
+            fi
+            ;;
+        upstart)
+            log_warning "Upstart logs are usually written to /var/log/upstart/${service_name}.log"
+            ;;
+        launchd)
+            if [ -f "/var/log/${service_name}.log" ]; then
+                tail -n 100 -f "/var/log/${service_name}.log"
+            elif [ -f "$HOME/Library/Logs/${service_name}.log" ]; then
+                tail -n 100 -f "$HOME/Library/Logs/${service_name}.log"
+            else
+                log_warning "Launchd log file not found for ${service_name}."
+            fi
+            ;;
+        *)
+            log_error "Unsupported or unknown init system detected: $init_system"
+            return 1
+            ;;
+    esac
+}
+
+collect_interactive_install_inputs() {
+    local endpoint_input config_choice config_path enable_ping ping_concurrency ping_min_interval
+
+    echo "未提供完整安装参数，进入交互式配置。"
+    echo "如需高级参数，请退出后重新执行脚本并追加对应 flags。"
+    echo ""
+
+    while true; do
+        read -r -p "请输入面板地址 (例如 https://monitor.example.com): " endpoint_input
+        if [ -n "$endpoint_input" ]; then
+            break
+        fi
+        log_error "面板地址不能为空。"
+    done
+
+    komari_args="--endpoint $endpoint_input"
+    komari_token=""
+    komari_has_explicit_config=false
+    komari_explicit_config_path=""
+
+    if [ -f "$komari_config_file" ]; then
+        echo "请选择认证材料来源："
+        echo "  1) 复用默认配置文件 ${komari_config_file}"
+        echo "  2) 使用自定义配置文件路径"
+        echo "  3) 输入节点 Token，并自动生成默认配置文件"
+        read -r -p "输入选项 [1-3]: " config_choice
+    else
+        echo "请选择认证材料来源："
+        echo "  1) 使用自定义配置文件路径"
+        echo "  2) 输入节点 Token，并自动生成默认配置文件"
+        read -r -p "输入选项 [1-2]: " config_choice
+    fi
+
+    case "$config_choice" in
+        1)
+            if [ -f "$komari_config_file" ]; then
+                komari_has_explicit_config=true
+                komari_explicit_config_path="$komari_config_file"
+                komari_args="$komari_args --config $komari_config_file"
+            else
+                config_path=$(prompt_with_default "请输入现有配置文件路径" "$komari_config_file")
+                komari_has_explicit_config=true
+                komari_explicit_config_path="$config_path"
+                komari_args="$komari_args --config $config_path"
+            fi
+            ;;
+        2)
+            if [ -f "$komari_config_file" ]; then
+                config_path=$(prompt_with_default "请输入现有配置文件路径" "$komari_config_file")
+                komari_has_explicit_config=true
+                komari_explicit_config_path="$config_path"
+                komari_args="$komari_args --config $config_path"
+            else
+                read -r -s -p "请输入节点 Token: " komari_token
+                echo ""
+            fi
+            ;;
+        3)
+            read -r -s -p "请输入节点 Token: " komari_token
+            echo ""
+            ;;
+        *)
+            log_error "无效选项"
+            return 1
+            ;;
+    esac
+
+    if prompt_yes_no "是否启用远程 Ping / 延迟监测" false; then
+        ping_concurrency=$(prompt_with_default "请输入最大并发 Ping 数" "24")
+        ping_min_interval=$(prompt_with_default "请输入最小 Ping 间隔（毫秒）" "0")
+        komari_args="$komari_args --enable-ping --max-concurrent-pings $ping_concurrency --ping-min-interval-millis $ping_min_interval"
+    fi
+
+    refresh_derived_values
+}
+
+install_agent() {
+    local interactive_mode="$1"
+
+    if service_exists || [ -x "$komari_agent_path" ]; then
+        log_warning "Agent appears to be installed already. Use upgrade or reconfigure instead of install."
+        return 1
+    fi
+
+    if [ "$interactive_mode" = "true" ]; then
+        collect_interactive_install_inputs || return 1
+    fi
+
+    ensure_install_inputs || return 1
+    refresh_derived_values
+    show_operation_configuration "Installation configuration:"
+    prepare_download_context || return 1
+    download_release_binary || return 1
+    replace_downloaded_binary || return 1
+    write_generated_config_if_needed || return 1
+    remove_service_registration
+    configure_service || return 1
     log_success "Komari-agent installation completed!"
-fi
-log_config "Service: ${GREEN}$service_name${NC}"
-log_config "Arguments: ${GREEN}$komari_service_args_log${NC}"
-echo -e "${WHITE}===========================================${NC}"
+    log_config "Service: ${GREEN}$service_name${NC}"
+    log_config "Arguments: ${GREEN}$komari_service_args_log${NC}"
+}
+
+reconfigure_agent() {
+    local interactive_mode="$1"
+
+    if [ "$interactive_mode" = "true" ]; then
+        collect_interactive_install_inputs || return 1
+    fi
+
+    ensure_install_inputs || return 1
+    refresh_derived_values
+    show_operation_configuration "Reconfiguration:"
+
+    if [ ! -x "$komari_agent_path" ] || [ -n "$install_version" ]; then
+        log_info "Agent binary is missing or a target version was requested. Downloading binary before reconfiguring..."
+        prepare_download_context || return 1
+        download_release_binary || return 1
+        replace_downloaded_binary || return 1
+    else
+        log_info "Reusing existing binary at ${GREEN}$komari_agent_path${NC}"
+    fi
+
+    write_generated_config_if_needed || return 1
+    remove_service_registration
+    configure_service || return 1
+    log_success "Komari-agent reconfiguration completed!"
+}
+
+upgrade_agent() {
+    local backup_path=""
+    local service_was_registered=false
+
+    if [ ! -x "$komari_agent_path" ]; then
+        log_error "Agent binary was not found at $komari_agent_path. Run install first."
+        return 1
+    fi
+
+    show_operation_configuration "Upgrade configuration:"
+    prepare_download_context || return 1
+
+    if service_exists; then
+        service_was_registered=true
+        log_step "Stopping existing service before upgrade..."
+        stop_registered_service
+    fi
+
+    backup_path="${komari_agent_path}.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$komari_agent_path" "$backup_path"
+    log_info "Backed up current binary to ${GREEN}$backup_path${NC}"
+
+    if ! download_release_binary; then
+        if [ "$service_was_registered" = true ]; then
+            start_registered_service || true
+        fi
+        return 1
+    fi
+
+    if ! replace_downloaded_binary; then
+        mv -f "$backup_path" "$komari_agent_path" >/dev/null 2>&1 || true
+        if [ "$service_was_registered" = true ]; then
+            start_registered_service || true
+        fi
+        return 1
+    fi
+
+    if [ "$service_was_registered" = true ]; then
+        log_step "Starting service after upgrade..."
+        if ! start_registered_service; then
+            log_error "Failed to restart the service after upgrade. Restoring previous binary..."
+            mv -f "$backup_path" "$komari_agent_path" >/dev/null 2>&1 || true
+            start_registered_service || true
+            return 1
+        fi
+    else
+        log_warning "No registered service was found. Binary has been upgraded, but no service restart was performed."
+    fi
+
+    log_success "Komari-agent upgrade completed!"
+}
+
+uninstall_agent() {
+    if [ "$assume_yes" != "true" ]; then
+        if ! prompt_yes_no "这将卸载 Komari Agent。是否继续" false; then
+            log_info "已取消卸载。"
+            return 0
+        fi
+    fi
+
+    remove_service_registration
+
+    if [ -f "$komari_agent_path" ]; then
+        rm -f "$komari_agent_path"
+        log_success "Removed binary: ${GREEN}$komari_agent_path${NC}"
+    fi
+
+    if [ -f "$legacy_komari_token_file" ]; then
+        rm -f "$legacy_komari_token_file"
+    fi
+
+    if [ "$purge_config" = true ] && [ -f "$komari_config_file" ]; then
+        rm -f "$komari_config_file"
+        log_success "Removed config file: ${GREEN}$komari_config_file${NC}"
+    elif [ -f "$komari_config_file" ]; then
+        log_warning "Preserved config file: ${GREEN}$komari_config_file${NC}"
+        log_info "Use --purge-config if you also want to delete the saved config file."
+    fi
+
+    log_success "Komari-agent uninstall completed!"
+}
+
+restart_agent() {
+    if ! service_exists; then
+        log_error "No registered service was found for ${service_name}."
+        return 1
+    fi
+    restart_registered_service
+    log_success "Service restarted: ${GREEN}$service_name${NC}"
+}
+
+stop_agent() {
+    if ! service_exists; then
+        log_error "No registered service was found for ${service_name}."
+        return 1
+    fi
+    stop_registered_service
+    log_success "Service stopped: ${GREEN}$service_name${NC}"
+}
+
+main_menu() {
+    show_banner
+    echo "请选择操作："
+    echo "  1) 安装 Agent"
+    echo "  2) 升级 Agent"
+    echo "  3) 重配 Agent"
+    echo "  4) 卸载 Agent"
+    echo "  5) 查看状态"
+    echo "  6) 查看日志"
+    echo "  7) 重启服务"
+    echo "  8) 停止服务"
+    echo "  9) 退出"
+    echo ""
+
+    read -r -p "输入选项 [1-9]: " choice
+    case "$choice" in
+        1) install_agent true ;;
+        2) upgrade_agent ;;
+        3) reconfigure_agent true ;;
+        4) uninstall_agent ;;
+        5) show_status ;;
+        6) show_logs ;;
+        7) restart_agent ;;
+        8) stop_agent ;;
+        9) exit 0 ;;
+        *)
+            log_error "无效选项"
+            return 1
+            ;;
+    esac
+}
+
+run_operation() {
+    case "$operation" in
+        help)
+            show_usage
+            ;;
+        menu)
+            main_menu
+            ;;
+        install)
+            install_agent false
+            ;;
+        upgrade)
+            upgrade_agent
+            ;;
+        reconfigure)
+            reconfigure_agent false
+            ;;
+        uninstall)
+            uninstall_agent
+            ;;
+        status)
+            show_status
+            ;;
+        logs)
+            show_logs
+            ;;
+        restart)
+            restart_agent
+            ;;
+        stop)
+            stop_agent
+            ;;
+        *)
+            log_error "Unsupported operation: $operation"
+            return 1
+            ;;
+    esac
+}
+
+run_operation

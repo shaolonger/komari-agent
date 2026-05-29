@@ -1,5 +1,10 @@
 # Windows PowerShell installation script for Komari Agent
 
+param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$InstallerArgs
+)
+
 # Logging functions with colors
 function Log-Info { param([string]$Message) Write-Host "$Message"    -ForegroundColor Cyan }
 function Log-Success { param([string]$Message) Write-Host "$Message"    -ForegroundColor Green }
@@ -242,380 +247,890 @@ $ServiceName = "komari-agent"
 $GitHubProxy = ""
 $GitHubProxyTrusted = $false
 $KomariArgs = @()
+$EffectiveKomariArgs = @()
 $TokenValue = ""
 $HasExplicitConfig = $false
 $ExplicitConfigPath = ""
 $InstallVersion = ""
+$Operation = ""
+$AssumeYes = $false
+$PurgeConfig = $false
+$ProxyDisplay = '(direct)'
+$ConfigFile = ''
+$LegacyTokenFile = ''
+$AgentPath = ''
+$AgentLogPath = ''
+$RedactedArgString = ''
+$ServiceArgString = ''
+$BinaryName = ''
+$DownloadUrl = ''
+$ChecksumUrl = ''
+$AgentDownloadTempPath = ''
+$AgentChecksumTempPath = ''
+$VersionToInstall = ''
+$ReleaseRepository = 'shaolonger/komari-agent'
+$OriginalArgs = @($InstallerArgs)
 
-# Parse script arguments
-for ($i = 0; $i -lt $args.Count; $i++) {
-    switch ($args[$i]) {
-        "--install-dir" { $InstallDir = $args[$i + 1]; $i++; continue }
-        "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
-        "--install-ghproxy" {
-            if ($i + 1 -ge $args.Count) {
-                Log-Error "Missing value for --install-ghproxy"
-                exit 1
-            }
-            $GitHubProxy = $args[$i + 1]
-            $i++
-            continue
-        }
-        "--install-ghproxy-trusted" { $GitHubProxyTrusted = $true; continue }
-        "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
-        "--token" {
-            if ($i + 1 -ge $args.Count) {
-                Log-Error "Missing value for --token"
-                exit 1
-            }
-            $TokenValue = $args[$i + 1]
-            $i++
-            continue
-        }
-        "-t" {
-            if ($i + 1 -ge $args.Count) {
-                Log-Error "Missing value for -t"
-                exit 1
-            }
-            $TokenValue = $args[$i + 1]
-            $i++
-            continue
-        }
-        "--config" {
-            if ($i + 1 -ge $args.Count) {
-                Log-Error "Missing value for --config"
-                exit 1
-            }
-            $HasExplicitConfig = $true
-            $ExplicitConfigPath = $args[$i + 1]
-            $KomariArgs += $args[$i]
-            $KomariArgs += $args[$i + 1]
-            $i++
-            continue
-        }
-        Default {
-            if ($args[$i] -like '--token=*') {
-                $TokenValue = $args[$i].Substring('--token='.Length)
-                continue
-            }
-            if ($args[$i] -like '-t=*') {
-                $TokenValue = $args[$i].Substring('-t='.Length)
-                continue
-            }
-            if ($args[$i] -like '--config=*') {
-                $HasExplicitConfig = $true
-                $ExplicitConfigPath = $args[$i].Substring('--config='.Length)
-            }
-            $KomariArgs += $args[$i]
-        }
+function Show-Banner {
+    Write-Host "===========================================" -ForegroundColor White
+    Write-Host "     Komari Agent Management Script      " -ForegroundColor White
+    Write-Host "===========================================" -ForegroundColor White
+    Write-Host ""
+}
+
+function Show-Usage {
+    Show-Banner
+    @"
+用法:
+  .\install.ps1                           打开交互菜单
+  .\install.ps1 --install [agent flags]   首次安装 Agent
+  .\install.ps1 --upgrade                 升级 Agent 二进制并重启服务
+  .\install.ps1 --reconfigure [flags]     重建 Agent 配置与服务定义
+  .\install.ps1 --uninstall               卸载 Agent 服务与二进制
+  .\install.ps1 --status                  查看 Agent 服务状态
+  .\install.ps1 --logs                    查看 Agent 服务日志
+  .\install.ps1 --restart                 重启 Agent 服务
+  .\install.ps1 --stop                    停止 Agent 服务
+
+常用安装参数:
+  --install-dir PATH
+  --install-service-name NAME
+  --install-version TAG
+  --install-ghproxy URL --install-ghproxy-trusted
+  --purge-config        卸载时额外删除配置文件
+  --yes                 跳过卸载确认
+
+常用 Agent 参数:
+  --endpoint URL
+  --token TOKEN
+  --config PATH
+  --enable-ping
+  --max-concurrent-pings N
+  --ping-min-interval-millis N
+
+说明:
+  1. 首次安装/重配会重建服务定义。
+  2. 升级只替换二进制并重启现有服务，不再重建配置。
+  3. 无参数执行时会进入交互式菜单。
+"@ | Write-Host
+}
+
+function ConvertTo-PlainText {
+    param([Security.SecureString]$SecureString)
+
+    if (-not $SecureString) {
+        return ''
     }
-}
 
-if (-not [string]::IsNullOrWhiteSpace($TokenValue) -and $HasExplicitConfig) {
-    Log-Error "Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file."
-    exit 1
-}
-
-if ($HasExplicitConfig -and -not (Test-Path -LiteralPath $ExplicitConfigPath -PathType Leaf)) {
-    Log-Error "The specified config file does not exist: $ExplicitConfigPath"
-    exit 1
-}
-
-if (-not [string]::IsNullOrWhiteSpace($GitHubProxy)) {
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
     try {
-        $GitHubProxy = Assert-TrustedGitHubProxy -Value $GitHubProxy -TrustAcknowledged:$GitHubProxyTrusted
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
     }
-    catch {
-        Log-Error $_.Exception.Message
+    finally {
+        if ($bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+}
+
+function Prompt-YesNo {
+    param(
+        [string]$Prompt,
+        [bool]$Default = $false
+    )
+
+    while ($true) {
+        $suffix = if ($Default) { '[Y/n]' } else { '[y/N]' }
+        $answer = Read-Host "$Prompt $suffix"
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $Default
+        }
+
+        switch ($answer.ToLowerInvariant()) {
+            'y' { return $true }
+            'yes' { return $true }
+            'n' { return $false }
+            'no' { return $false }
+            default { Log-Error '请输入 y 或 n。' }
+        }
+    }
+}
+
+function Prompt-WithDefault {
+    param(
+        [string]$Prompt,
+        [string]$DefaultValue
+    )
+
+    $answer = Read-Host "$Prompt [$DefaultValue]"
+    if ([string]::IsNullOrWhiteSpace($answer)) {
+        return $DefaultValue
+    }
+
+    return $answer
+}
+
+function Convert-ArgsToServiceString {
+    param([string[]]$Arguments)
+
+    $escaped = foreach ($arg in $Arguments) {
+        if ($arg -match '[\s"]') {
+            '"' + ($arg -replace '"', '\"') + '"'
+        }
+        else {
+            $arg
+        }
+    }
+
+    return ($escaped -join ' ')
+}
+
+function Update-DerivedValues {
+    $script:ConfigFile = Join-Path $InstallDir 'komari-agent.json'
+    $script:LegacyTokenFile = Join-Path $InstallDir 'komari-agent.token'
+    $script:AgentPath = Join-Path $InstallDir 'komari-agent.exe'
+    $script:AgentLogPath = Join-Path $InstallDir 'komari-agent.log'
+    $script:ProxyDisplay = if ([string]::IsNullOrWhiteSpace($GitHubProxy)) { '(direct)' } else { Format-KomariUrlForLog -Value $GitHubProxy }
+
+    $script:EffectiveKomariArgs = @($KomariArgs)
+    if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
+        $script:EffectiveKomariArgs += '--config'
+        $script:EffectiveKomariArgs += $script:ConfigFile
+    }
+
+    $script:RedactedArgString = Format-KomariArgsForLog -Arguments $script:EffectiveKomariArgs
+    $script:ServiceArgString = Convert-ArgsToServiceString -Arguments $script:EffectiveKomariArgs
+}
+
+function Parse-InstallerArguments {
+    for ($i = 0; $i -lt $InstallerArgs.Count; $i++) {
+        switch ($InstallerArgs[$i]) {
+            '--install' { $script:Operation = 'install'; continue }
+            '--upgrade' { $script:Operation = 'upgrade'; continue }
+            '--reconfigure' { $script:Operation = 'reconfigure'; continue }
+            '--uninstall' { $script:Operation = 'uninstall'; continue }
+            '--status' { $script:Operation = 'status'; continue }
+            '--logs' { $script:Operation = 'logs'; continue }
+            '--restart' { $script:Operation = 'restart'; continue }
+            '--stop' { $script:Operation = 'stop'; continue }
+            '--menu' { $script:Operation = 'menu'; continue }
+            '--help' { $script:Operation = 'help'; continue }
+            '-h' { $script:Operation = 'help'; continue }
+            '--yes' { $script:AssumeYes = $true; continue }
+            '-y' { $script:AssumeYes = $true; continue }
+            '--purge-config' { $script:PurgeConfig = $true; continue }
+            '--install-dir' { $script:InstallDir = $InstallerArgs[$i + 1]; $i++; continue }
+            '--install-service-name' { $script:ServiceName = $InstallerArgs[$i + 1]; $i++; continue }
+            '--install-ghproxy' {
+                if ($i + 1 -ge $InstallerArgs.Count) {
+                    Log-Error 'Missing value for --install-ghproxy'
+                    exit 1
+                }
+                $script:GitHubProxy = $InstallerArgs[$i + 1]
+                $i++
+                continue
+            }
+            '--install-ghproxy-trusted' { $script:GitHubProxyTrusted = $true; continue }
+            '--install-version' { $script:InstallVersion = $InstallerArgs[$i + 1]; $i++; continue }
+            '--token' {
+                if ($i + 1 -ge $InstallerArgs.Count) {
+                    Log-Error 'Missing value for --token'
+                    exit 1
+                }
+                $script:TokenValue = $InstallerArgs[$i + 1]
+                $i++
+                continue
+            }
+            '-t' {
+                if ($i + 1 -ge $InstallerArgs.Count) {
+                    Log-Error 'Missing value for -t'
+                    exit 1
+                }
+                $script:TokenValue = $InstallerArgs[$i + 1]
+                $i++
+                continue
+            }
+            '--config' {
+                if ($i + 1 -ge $InstallerArgs.Count) {
+                    Log-Error 'Missing value for --config'
+                    exit 1
+                }
+                $script:HasExplicitConfig = $true
+                $script:ExplicitConfigPath = $InstallerArgs[$i + 1]
+                $script:KomariArgs += $InstallerArgs[$i]
+                $script:KomariArgs += $InstallerArgs[$i + 1]
+                $i++
+                continue
+            }
+            default {
+                if ($InstallerArgs[$i] -like '--token=*') {
+                    $script:TokenValue = $InstallerArgs[$i].Substring('--token='.Length)
+                    continue
+                }
+                if ($InstallerArgs[$i] -like '-t=*') {
+                    $script:TokenValue = $InstallerArgs[$i].Substring('-t='.Length)
+                    continue
+                }
+                if ($InstallerArgs[$i] -like '--config=*') {
+                    $script:HasExplicitConfig = $true
+                    $script:ExplicitConfigPath = $InstallerArgs[$i].Substring('--config='.Length)
+                }
+                $script:KomariArgs += $InstallerArgs[$i]
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Operation)) {
+        if ($OriginalArgs.Count -eq 0) {
+            $script:Operation = 'menu'
+        }
+        else {
+            $script:Operation = 'install'
+        }
+    }
+}
+
+function Validate-InstallerArguments {
+    if (-not [string]::IsNullOrWhiteSpace($TokenValue) -and $HasExplicitConfig) {
+        Log-Error 'Cannot combine --token with an explicit --config. Remove --config and let the installer generate a protected config file.'
         exit 1
     }
-    Log-Warning "Using --install-ghproxy only with an organization-controlled HTTPS proxy that mirrors GitHub release binaries and .sha256 assets without modification."
-}
 
-# Ensure running as Administrator
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
-    ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
-    Log-Error "Please run this script as Administrator."
-    exit 1
-}
-
-# Prepare GitHub proxy display
-if ($GitHubProxy -ne '') { $ProxyDisplay = Format-KomariUrlForLog -Value $GitHubProxy } else { $ProxyDisplay = '(direct)' }
-$ConfigFile = Join-Path $InstallDir 'komari-agent.json'
-$LegacyTokenFile = Join-Path $InstallDir 'komari-agent.token'
-if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
-    $KomariArgs += "--config=`"$ConfigFile`""
-}
-$RedactedArgString = Format-KomariArgsForLog -Arguments $KomariArgs
-
-# Detect architecture early for constructing binary name
-switch ($env:PROCESSOR_ARCHITECTURE) {
-    'AMD64' { $arch = 'amd64' }
-    'ARM64' { $arch = 'arm64' }
-    'x86' { $arch = '386' }
-    Default { Log-Error "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE"; exit 1 }
-}
-
-# Ensure installation directory exists for nssm and agent
-Log-Step "Ensuring installation directory exists: $InstallDir"
-New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null # Ensure $InstallDir exists
-$NssmReleaseSha1 = 'be7b3577c6e3a280e5106a9e9db5b3775931cefc'
-
-# Check for nssm and download if not present
-$nssmExeToUse = Join-Path $InstallDir "nssm.exe"
-
-# First, check if nssm is in PATH and is functional
-$nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
-if ($nssmCmd) {
-    Log-Info "nssm found in PATH at $($nssmCmd.Source)."
-    try {
-        $nssmVersionOutput = nssm version 2>&1
-        Log-Info "Detected nssm version: $nssmVersionOutput"
+    if (-not [string]::IsNullOrWhiteSpace($GitHubProxy)) {
+        try {
+            $script:GitHubProxy = Assert-TrustedGitHubProxy -Value $GitHubProxy -TrustAcknowledged:$GitHubProxyTrusted
+        }
+        catch {
+            Log-Error $_.Exception.Message
+            exit 1
+        }
+        Log-Warning 'Using --install-ghproxy only with an organization-controlled HTTPS proxy that mirrors GitHub release binaries and .sha256 assets without modification.'
     }
-    catch {
-        Log-Warning "nssm found in PATH failed to execute 'nssm version'. Will attempt to use/download local copy. Error: $_"
-        $nssmCmd = $null # Force re-evaluation for local copy or download
+
+    Update-DerivedValues
+}
+
+function Operation-RequiresAdministrator {
+    return $Operation -ne 'help'
+}
+
+Parse-InstallerArguments
+Validate-InstallerArguments
+
+if (Operation-RequiresAdministrator) {
+    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+        Log-Error 'Please run this script as Administrator.'
+        exit 1
     }
 }
 
-# If nssm not found in PATH or the one in PATH failed, check local $InstallDir
-if (-not $nssmCmd) {
-    if (Test-Path $nssmExeToUse) {
-        Log-Info "nssm found at $nssmExeToUse. Attempting to use it by adding $InstallDir to PATH."
-        $env:Path = "$($InstallDir);$($env:Path)"
+function Show-OperationConfiguration {
+    param([string]$Heading)
+
+    Show-Banner
+    Log-Config $Heading
+    Log-Config "Service name: $ServiceName"
+    Log-Config "Install directory: $InstallDir"
+    Log-Config "GitHub proxy: $ProxyDisplay"
+    if (-not [string]::IsNullOrWhiteSpace($RedactedArgString)) {
+        Log-Config "Agent arguments: $RedactedArgString"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
+        Log-Config "Config file: $ConfigFile"
+    }
+    elseif ($HasExplicitConfig) {
+        Log-Config "Config file: $ExplicitConfigPath"
+    }
+    Log-Config "Target version: $(if ($InstallVersion) { $InstallVersion } else { 'Latest' })"
+    Write-Host ""
+}
+
+function Resolve-Architecture {
+    switch ($env:PROCESSOR_ARCHITECTURE) {
+        'AMD64' { return 'amd64' }
+        'ARM64' { return 'arm64' }
+        'x86' { return '386' }
+        default {
+            throw "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE"
+        }
+    }
+}
+
+function Ensure-NssmAvailable {
+    Log-Step "Ensuring installation directory exists: $InstallDir"
+    New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null
+
+    $nssmReleaseSha1 = 'be7b3577c6e3a280e5106a9e9db5b3775931cefc'
+    $nssmCiVersion = '2.24-101-g897c7ad'
+    $nssmCiSha256 = '99f5045fffbffb745d67fe3a065a953c4a3d9c253b868892d9b685b0ee7d07b8'
+    $nssmExeToUse = Join-Path $InstallDir 'nssm.exe'
+    $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
+
+    if ($nssmCmd) {
+        try {
+            $null = nssm version 2>&1
+            return
+        }
+        catch {
+            $nssmCmd = $null
+        }
+    }
+
+    if (-not $nssmCmd -and (Test-Path $nssmExeToUse)) {
+        $env:Path = "$InstallDir;$($env:Path)"
         $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
         if ($nssmCmd) {
             try {
-                $nssmVersionOutput = nssm version 2>&1
+                $null = nssm version 2>&1
+                return
             }
             catch {
-                Log-Warning "nssm from $InstallDir failed to execute 'nssm version'. Error: $_"
-                $nssmCmd = $null # Mark as unusable
+                $nssmCmd = $null
             }
-        }
-        else {
-            Log-Warning "Failed to make nssm from $nssmExeToUse available via PATH. Will attempt download."
         }
     }
-}
 
-# If still no usable nssm command, proceed to download
-if (-not $nssmCmd) {
-    Log-Info "nssm not found or not usable. Attempting to download to $InstallDir..."
-    $NssmVersion = "2.24"
-    $NssmZipUrl = "https://nssm.cc/release/nssm-$NssmVersion.zip"
-    $TempNssmZipPath = Join-Path $env:TEMP "nssm-$NssmVersion-$PID.zip"
-    $TempExtractDir = Join-Path $env:TEMP "nssm_extract_temp_$PID"
+    if (-not $nssmCmd) {
+        Log-Info "nssm not found or not usable. Attempting to download to $InstallDir..."
+        $nssmVersion = '2.24'
+        $nssmZipUrl = "https://nssm.cc/release/nssm-$nssmVersion.zip"
+        $nssmCiZipUrl = "https://nssm.cc/ci/nssm-$nssmCiVersion.zip"
+        $nssmArchiveRoot = "nssm-$nssmVersion"
+        $tempNssmZipPath = Join-Path $env:TEMP "nssm-$nssmVersion-$PID.zip"
+        $tempExtractDir = Join-Path $env:TEMP "nssm_extract_temp_$PID"
 
-    try {
-        Log-Info "Downloading nssm from $NssmZipUrl..."
-        Invoke-WebRequest -Uri $NssmZipUrl -OutFile $TempNssmZipPath -UseBasicParsing
-
-        Log-Step "Verifying nssm archive hash..."
-        Assert-KomariFileHash -Path $TempNssmZipPath -Algorithm SHA1 -ExpectedHash $NssmReleaseSha1 -Label "nssm-$NssmVersion.zip"
-
-        if (Test-Path $TempExtractDir) { Remove-Item -Recurse -Force $TempExtractDir }
-        New-Item -ItemType Directory -Path $TempExtractDir -Force | Out-Null
-        Expand-Archive -Path $TempNssmZipPath -DestinationPath $TempExtractDir -Force
-        
-        $NssmSourceDirInsideZip = "nssm-$NssmVersion" # Used for Get-ChildItem search path
-        # The path part within the extracted nssm folder, e.g., "nssm-2.24\win32"
-        # 'win32' nssm is used for both 'amd64' and 'arm64' PowerShell architectures.
-        $NssmArchSubDir = Join-Path "nssm-$NssmVersion" "win32"
-        $NssmSourceExePath = Join-Path (Join-Path $TempExtractDir $NssmArchSubDir) "nssm.exe"
-
-        if (-not (Test-Path $NssmSourceExePath)) {
-            Log-Error "Could not find nssm.exe at expected path: $NssmSourceExePath after extraction."
-            # Fallback search for nssm.exe within the extracted directory
-            $foundNssmFallback = Get-ChildItem -Path $TempExtractDir -Recurse -Filter "nssm.exe" | 
-            Where-Object { $_.FullName -like "*$NssmArchSubDir\nssm.exe" } | 
-            Select-Object -First 1
-            if ($foundNssmFallback) {
-                Log-Warning "Found nssm.exe at $($foundNssmFallback.FullName) using fallback search. Using this."
-                $NssmSourceExePath = $foundNssmFallback.FullName
+        try {
+            try {
+                Invoke-WebRequest -Uri $nssmZipUrl -OutFile $tempNssmZipPath -UseBasicParsing
+                Assert-KomariFileHash -Path $tempNssmZipPath -Algorithm SHA1 -ExpectedHash $nssmReleaseSha1 -Label "nssm-$nssmVersion.zip"
             }
-            else {
-                Log-Error "nssm.exe ($NssmArchSubDir) still not found in $TempExtractDir. Please install nssm manually (from https://nssm.cc) and ensure it's in your PATH."
-                exit 1
+            catch {
+                if (Test-Path $tempNssmZipPath) { Remove-Item $tempNssmZipPath -Force -ErrorAction SilentlyContinue }
+                Log-Warning "Failed to download or verify the stable NSSM release from $nssmZipUrl. Trying the CI build referenced by the winget manifest..."
+                Invoke-WebRequest -Uri $nssmCiZipUrl -OutFile $tempNssmZipPath -UseBasicParsing
+                Assert-KomariFileHash -Path $tempNssmZipPath -Algorithm SHA256 -ExpectedHash $nssmCiSha256 -Label "nssm-$nssmCiVersion.zip"
+                $nssmArchiveRoot = "nssm-$nssmCiVersion"
             }
-        }
-        
-        Copy-Item -Path $NssmSourceExePath -Destination $nssmExeToUse -Force
 
-        $env:Path = "$($InstallDir);$($env:Path)"
-        $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue # Re-check after adding to PATH
-        if ($nssmCmd) {
-            Log-Success "Downloaded nssm is now configured and available in PATH."
+            if (Test-Path $tempExtractDir) { Remove-Item -Recurse -Force $tempExtractDir }
+            New-Item -ItemType Directory -Path $tempExtractDir -Force | Out-Null
+            Expand-Archive -Path $tempNssmZipPath -DestinationPath $tempExtractDir -Force
+
+            $nssmSourceExePath = Join-Path (Join-Path $tempExtractDir (Join-Path $nssmArchiveRoot 'win32')) 'nssm.exe'
+            if (-not (Test-Path $nssmSourceExePath)) {
+                $fallback = Get-ChildItem -Path $tempExtractDir -Recurse -Filter 'nssm.exe' | Select-Object -First 1
+                if (-not $fallback) {
+                    throw 'nssm.exe was not found after extraction.'
+                }
+                $nssmSourceExePath = $fallback.FullName
+            }
+
+            Copy-Item -Path $nssmSourceExePath -Destination $nssmExeToUse -Force
+            $env:Path = "$InstallDir;$($env:Path)"
         }
-        else {
-            Log-Error "Failed to configure downloaded nssm in PATH from $nssmExeToUse. Please ensure $InstallDir is in your system PATH or nssm is installed globally."
+        catch {
+            Log-Error "Failed to download or configure nssm: $_"
+            Log-Error 'Please install nssm manually from https://nssm.cc and ensure nssm.exe is in your PATH.'
             exit 1
         }
-    }
-    catch {
-        Log-Error "Failed to download or configure nssm: $_"
-        Log-Error "Please install nssm manually from https://nssm.cc and ensure nssm.exe is in your PATH."
-        exit 1
-    }
-    finally {
-        if (Test-Path $TempNssmZipPath) { Remove-Item $TempNssmZipPath -Force -ErrorAction SilentlyContinue }
-        if (Test-Path $TempExtractDir) { Remove-Item $TempExtractDir -Recurse -Force -ErrorAction SilentlyContinue }
-    }
-}
-
-# Final check that nssm is operational
-try {
-    $nssmVersionOutput = nssm version 2>&1
-}
-catch {
-    Log-Error "nssm command failed to execute even after setup attempts. Please check the nssm installation and PATH. Error: $_"
-    exit 1
-}
-
-Log-Step "Installation configuration:"
-Log-Config "Service name: $ServiceName"
-Log-Config "Install directory: $InstallDir"
-Log-Config "GitHub proxy: $ProxyDisplay"
-Log-Config "Agent arguments: $RedactedArgString"
-if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
-    Log-Config "Config file: $ConfigFile"
-}
-elseif ($HasExplicitConfig) {
-    Log-Config "Config file: $ExplicitConfigPath"
-}
-if ($InstallVersion -ne "") {
-    Log-Config "Specified agent version: $InstallVersion"
-} else {
-    Log-Config "Agent version: Latest"
-}
-
-# Paths
-$BinaryName = "komari-agent-windows-$arch.exe"
-$AgentPath = Join-Path $InstallDir "komari-agent.exe"
-
-# Uninstall previous service and binary
-function Uninstall-Previous {
-    Log-Step "Checking for existing service..."
-    # Check if service exists using nssm status, as Get-Service might not work for nssm services if not properly registered
-    $serviceStatus = nssm status $ServiceName 2>&1
-    if ($serviceStatus -notmatch "SERVICE_STOPPED" -and $serviceStatus -notmatch "does not exist") {
-        Log-Info "Stopping service $ServiceName..."
-        nssm stop $ServiceName 2>&1 | Out-Null
-    }
-    # Attempt to remove the service using nssm
-    # We check if it exists first by trying to get its status.
-    # nssm remove will succeed if the service exists, and fail otherwise.
-    # We add confirm to avoid interactive prompts.
-    $removeOutput = nssm remove $ServiceName confirm 2>&1
-    if ($LASTEXITCODE -eq 0) {
-    }
-    elseif ($removeOutput -match "Can't open service! (The specified service does not exist as an installed service.)" -or $removeOutput -match "No such service" -or $removeOutput -match "does not exist") {
-        Log-Info "Service $ServiceName does not exist or was already removed."
-    }
-    else {
-        # If nssm remove fails for other reasons, try sc.exe delete as a fallback for older installations
-        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($svc) {
-            Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
-            sc.exe delete $ServiceName | Out-Null
+        finally {
+            if (Test-Path $tempNssmZipPath) { Remove-Item $tempNssmZipPath -Force -ErrorAction SilentlyContinue }
+            if (Test-Path $tempExtractDir) { Remove-Item $tempExtractDir -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
 
-    if (Test-Path $AgentPath) {
-        Log-Warning "Existing binary will be replaced after checksum verification."
-    }
-
-    if (Test-Path $ConfigFile) {
-        Log-Info "Preserving existing config file: $ConfigFile"
-    }
-
-    if (Test-Path $LegacyTokenFile) {
-        Log-Warning "Removing old token file..."
-        Remove-Item $LegacyTokenFile -Force
-    }
-}
-Uninstall-Previous
-
-$ReleaseRepository = 'shaolonger/komari-agent'
-$versionToInstall = ""
-if ($InstallVersion -ne "") {
-    Log-Info "Attempting to install specified version: $InstallVersion"
-    $versionToInstall = $InstallVersion
-}
-else {
-    $ApiUrl = "https://api.github.com/repos/$ReleaseRepository/releases/latest"
     try {
-        Log-Step "Fetching latest release version from GitHub API..."
-        $release = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
-        $versionToInstall = $release.tag_name
-        Log-Success "Latest version fetched: $versionToInstall"
+        $null = nssm version 2>&1
+    }
+    catch {
+        Log-Error "nssm command failed to execute even after setup attempts. Please check the nssm installation and PATH. Error: $_"
+        exit 1
+    }
+}
+
+function Resolve-ReleaseVersion {
+    if (-not [string]::IsNullOrWhiteSpace($InstallVersion)) {
+        $script:VersionToInstall = $InstallVersion
+        return
+    }
+
+    $apiUrl = "https://api.github.com/repos/$ReleaseRepository/releases/latest"
+    try {
+        Log-Step 'Fetching latest release version from GitHub API...'
+        $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing
+        $script:VersionToInstall = $release.tag_name
+        Log-Success "Latest version fetched: $script:VersionToInstall"
     }
     catch {
         Log-Error "No published GitHub release is available in $ReleaseRepository. Publish a release with binary and .sha256 assets, or rerun with --install-version for an existing release tag."
         exit 1
     }
 }
-Log-Success "Installing Komari Agent version: $versionToInstall"
 
-# Construct download URL
-$BinaryName = "komari-agent-windows-$arch.exe"
-$DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/shaolonger/komari-agent/releases/download/$versionToInstall/$BinaryName" } else { "https://github.com/shaolonger/komari-agent/releases/download/$versionToInstall/$BinaryName" }
-$ChecksumUrl = "$DownloadUrl.sha256"
-$AgentDownloadTempPath = Join-Path $InstallDir "komari-agent.exe.download.$PID"
-$AgentChecksumTempPath = "$AgentDownloadTempPath.sha256"
-
-# Download and install
-New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-Log-Info "URL: $(Format-KomariUrlForLog -Value $DownloadUrl)"
-try {
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $AgentDownloadTempPath -UseBasicParsing
-
-    Log-Info "Checksum URL: $(Format-KomariUrlForLog -Value $ChecksumUrl)"
-    Invoke-WebRequest -Uri $ChecksumUrl -OutFile $AgentChecksumTempPath -UseBasicParsing
-
-    Log-Step "Verifying agent SHA256 checksum..."
-    $expectedAgentHash = Get-KomariChecksumValue -Path $AgentChecksumTempPath
-    Assert-KomariFileHash -Path $AgentDownloadTempPath -Algorithm SHA256 -ExpectedHash $expectedAgentHash -Label $BinaryName
-
-    Move-Item -Path $AgentDownloadTempPath -Destination $AgentPath -Force
+function Prepare-DownloadContext {
+    Ensure-NssmAvailable
+    $script:arch = Resolve-Architecture
+    Log-Info "Detected architecture: $script:arch"
+    Resolve-ReleaseVersion
+    $script:BinaryName = "komari-agent-windows-$script:arch.exe"
+    $script:DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/$ReleaseRepository/releases/download/$script:VersionToInstall/$script:BinaryName" } else { "https://github.com/$ReleaseRepository/releases/download/$script:VersionToInstall/$script:BinaryName" }
+    $script:ChecksumUrl = "$script:DownloadUrl.sha256"
+    $script:AgentDownloadTempPath = Join-Path $InstallDir "komari-agent.exe.download.$PID"
+    $script:AgentChecksumTempPath = "$script:AgentDownloadTempPath.sha256"
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
-catch {
-    Log-Error "Download or verification failed. Ensure $ReleaseRepository release $versionToInstall includes $BinaryName and $BinaryName.sha256."
-    exit 1
-}
-finally {
-    if (Test-Path $AgentDownloadTempPath) { Remove-Item $AgentDownloadTempPath -Force -ErrorAction SilentlyContinue }
-    if (Test-Path $AgentChecksumTempPath) { Remove-Item $AgentChecksumTempPath -Force -ErrorAction SilentlyContinue }
-}
-Log-Success "Downloaded and saved to $AgentPath"
 
-if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
-    Log-Step "Writing service config file..."
+function Download-AgentBinary {
+    Log-Info "URL: $(Format-KomariUrlForLog -Value $DownloadUrl)"
     try {
-        Write-KomariConfigFile -Path $ConfigFile -Token $TokenValue
+        Invoke-WebRequest -Uri $DownloadUrl -OutFile $AgentDownloadTempPath -UseBasicParsing
+        Log-Info "Checksum URL: $(Format-KomariUrlForLog -Value $ChecksumUrl)"
+        Invoke-WebRequest -Uri $ChecksumUrl -OutFile $AgentChecksumTempPath -UseBasicParsing
+
+        $expectedAgentHash = Get-KomariChecksumValue -Path $AgentChecksumTempPath
+        Assert-KomariFileHash -Path $AgentDownloadTempPath -Algorithm SHA256 -ExpectedHash $expectedAgentHash -Label $BinaryName
     }
     catch {
-        Log-Error "Failed to write config file: $_"
-        exit 1
+        if (Test-Path $AgentDownloadTempPath) { Remove-Item $AgentDownloadTempPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $AgentChecksumTempPath) { Remove-Item $AgentChecksumTempPath -Force -ErrorAction SilentlyContinue }
+        Log-Error "Download or verification failed. Ensure $ReleaseRepository release $VersionToInstall includes $BinaryName and $BinaryName.sha256."
+        throw
     }
-    Log-Success "Service config stored at $ConfigFile"
 }
 
-# Register and start service
-Log-Step "Configuring Windows service with nssm..."
-$argString = $KomariArgs -join ' '
-# Ensure InstallDir and AgentPath are quoted if they contain spaces
-$quotedAgentPath = "`"$AgentPath`""
-nssm install $ServiceName $quotedAgentPath $argString
-# Set display name and startup type using nssm
-nssm set $ServiceName DisplayName "Komari Agent Service"
-nssm set $ServiceName Start SERVICE_AUTO_START
-nssm set $ServiceName AppExit Default Restart
-nssm set $ServiceName AppRestartDelay 5000
-# Start the service using nssm
-nssm start $ServiceName
-Log-Success "Service $ServiceName installed and started using nssm."
+function Replace-DownloadedBinary {
+    try {
+        Move-Item -Path $AgentDownloadTempPath -Destination $AgentPath -Force
+    }
+    finally {
+        if (Test-Path $AgentDownloadTempPath) { Remove-Item $AgentDownloadTempPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $AgentChecksumTempPath) { Remove-Item $AgentChecksumTempPath -Force -ErrorAction SilentlyContinue }
+    }
+    Log-Success "Downloaded and saved to $AgentPath"
+}
 
-Log-Success "Komari Agent installation completed!"
-Log-Config "Service name: $ServiceName"
-Log-Config "Arguments: $RedactedArgString"
+function Test-ArgsContainEndpoint {
+    foreach ($arg in $KomariArgs) {
+        if ($arg -eq '--endpoint' -or $arg -eq '-e' -or $arg -like '--endpoint=*' -or $arg -like '-e=*') {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-ConfigHasEndpoint {
+    param([string]$Path)
+    return [bool](Select-String -Path $Path -Pattern '"endpoint"\s*:' -Quiet -ErrorAction SilentlyContinue)
+}
+
+function Ensure-InstallInputs {
+    if (-not [string]::IsNullOrWhiteSpace($TokenValue) -and -not (Test-ArgsContainEndpoint)) {
+        Log-Error 'When generating a config from --token, you must also provide --endpoint.'
+        exit 1
+    }
+
+    if ($HasExplicitConfig) {
+        if (-not (Test-Path -LiteralPath $ExplicitConfigPath -PathType Leaf)) {
+            Log-Error "The specified config file does not exist: $ExplicitConfigPath"
+            exit 1
+        }
+        if (-not (Test-ArgsContainEndpoint) -and -not (Test-ConfigHasEndpoint -Path $ExplicitConfigPath)) {
+            Log-Error 'The selected config file does not contain an endpoint, and no --endpoint flag was provided.'
+            exit 1
+        }
+        return
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
+        return
+    }
+
+    if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+        $script:HasExplicitConfig = $true
+        $script:ExplicitConfigPath = $ConfigFile
+        $script:KomariArgs += '--config'
+        $script:KomariArgs += $ConfigFile
+        Update-DerivedValues
+        if (-not (Test-ArgsContainEndpoint) -and -not (Test-ConfigHasEndpoint -Path $ConfigFile)) {
+            Log-Error 'The default config file does not contain an endpoint, and no --endpoint flag was provided.'
+            exit 1
+        }
+        return
+    }
+
+    Log-Error 'No usable agent config was found. Provide --config, or provide --endpoint with --token, or use the interactive install menu.'
+    exit 1
+}
+
+function Write-GeneratedConfigIfNeeded {
+    if (-not [string]::IsNullOrWhiteSpace($TokenValue)) {
+        Log-Step 'Writing service config file...'
+        try {
+            Write-KomariConfigFile -Path $ConfigFile -Token $TokenValue
+        }
+        catch {
+            Log-Error "Failed to write config file: $_"
+            exit 1
+        }
+        Log-Success "Service config stored at $ConfigFile"
+    }
+}
+
+function Service-Exists {
+    return $null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)
+}
+
+function Stop-RegisteredService {
+    if (Service-Exists) {
+        nssm stop $ServiceName 2>&1 | Out-Null
+    }
+}
+
+function Start-RegisteredService {
+    if (Service-Exists) {
+        nssm start $ServiceName 2>&1 | Out-Null
+    }
+}
+
+function Restart-RegisteredService {
+    if (-not (Service-Exists)) {
+        throw "Service $ServiceName does not exist."
+    }
+    nssm restart $ServiceName 2>&1 | Out-Null
+}
+
+function Remove-ServiceRegistration {
+    if (-not (Service-Exists)) {
+        return
+    }
+
+    $null = nssm stop $ServiceName 2>&1
+    $removeOutput = nssm remove $ServiceName confirm 2>&1
+    if ($LASTEXITCODE -ne 0 -and $removeOutput -notmatch 'does not exist') {
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc) {
+            Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
+            sc.exe delete $ServiceName | Out-Null
+        }
+    }
+}
+
+function Configure-Service {
+    Log-Step 'Configuring Windows service with nssm...'
+    Remove-ServiceRegistration
+    nssm install $ServiceName $AgentPath | Out-Null
+    nssm set $ServiceName AppParameters $ServiceArgString | Out-Null
+    nssm set $ServiceName AppDirectory $InstallDir | Out-Null
+    nssm set $ServiceName DisplayName 'Komari Agent Service' | Out-Null
+    nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
+    nssm set $ServiceName AppExit Default Restart | Out-Null
+    nssm set $ServiceName AppRestartDelay 5000 | Out-Null
+    nssm set $ServiceName AppStdout $AgentLogPath | Out-Null
+    nssm set $ServiceName AppStderr $AgentLogPath | Out-Null
+    nssm set $ServiceName AppRotateFiles 1 | Out-Null
+    nssm set $ServiceName AppRotateOnline 1 | Out-Null
+    Start-RegisteredService
+    Log-Success "Service $ServiceName installed and started using nssm."
+}
+
+function Show-ServiceStatus {
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        Log-Error "Service $ServiceName was not found."
+        exit 1
+    }
+
+    $svc | Format-List Name, DisplayName, Status, StartType
+    try {
+        $appParameters = nssm get $ServiceName AppParameters 2>$null
+        if ($appParameters) {
+            Log-Info "AppParameters: $appParameters"
+        }
+    }
+    catch {
+    }
+}
+
+function Show-ServiceLogs {
+    if (Test-Path -LiteralPath $AgentLogPath) {
+        Get-Content -Path $AgentLogPath -Tail 100 -Wait
+        return
+    }
+
+    Log-Warning "No redirected service log file was found at $AgentLogPath."
+    Log-Info 'If this is an older installation, re-run install.ps1 --reconfigure to register the standard log file path.'
+}
+
+function Collect-InteractiveInstallInputs {
+    $endpoint = ''
+    while ([string]::IsNullOrWhiteSpace($endpoint)) {
+        $endpoint = Read-Host '请输入面板地址 (例如 https://monitor.example.com)'
+        if ([string]::IsNullOrWhiteSpace($endpoint)) {
+            Log-Error '面板地址不能为空。'
+        }
+    }
+
+    $script:KomariArgs = @('--endpoint', $endpoint)
+    $script:TokenValue = ''
+    $script:HasExplicitConfig = $false
+    $script:ExplicitConfigPath = ''
+
+    if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+        Write-Host '请选择认证材料来源：'
+        Write-Host "  1) 复用默认配置文件 $ConfigFile"
+        Write-Host '  2) 使用自定义配置文件路径'
+        Write-Host '  3) 输入节点 Token，并自动生成默认配置文件'
+        $configChoice = Read-Host '输入选项 [1-3]'
+    }
+    else {
+        Write-Host '请选择认证材料来源：'
+        Write-Host '  1) 使用自定义配置文件路径'
+        Write-Host '  2) 输入节点 Token，并自动生成默认配置文件'
+        $configChoice = Read-Host '输入选项 [1-2]'
+    }
+
+    switch ($configChoice) {
+        '1' {
+            if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+                $script:HasExplicitConfig = $true
+                $script:ExplicitConfigPath = $ConfigFile
+                $script:KomariArgs += '--config'
+                $script:KomariArgs += $ConfigFile
+            }
+            else {
+                $configPath = Prompt-WithDefault -Prompt '请输入现有配置文件路径' -DefaultValue $ConfigFile
+                $script:HasExplicitConfig = $true
+                $script:ExplicitConfigPath = $configPath
+                $script:KomariArgs += '--config'
+                $script:KomariArgs += $configPath
+            }
+        }
+        '2' {
+            if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+                $configPath = Prompt-WithDefault -Prompt '请输入现有配置文件路径' -DefaultValue $ConfigFile
+                $script:HasExplicitConfig = $true
+                $script:ExplicitConfigPath = $configPath
+                $script:KomariArgs += '--config'
+                $script:KomariArgs += $configPath
+            }
+            else {
+                $script:TokenValue = ConvertTo-PlainText -SecureString (Read-Host '请输入节点 Token' -AsSecureString)
+            }
+        }
+        '3' {
+            $script:TokenValue = ConvertTo-PlainText -SecureString (Read-Host '请输入节点 Token' -AsSecureString)
+        }
+        default {
+            Log-Error '无效选项'
+            exit 1
+        }
+    }
+
+    if (Prompt-YesNo -Prompt '是否启用远程 Ping / 延迟监测' -Default:$false) {
+        $pingConcurrency = Prompt-WithDefault -Prompt '请输入最大并发 Ping 数' -DefaultValue '24'
+        $pingMinInterval = Prompt-WithDefault -Prompt '请输入最小 Ping 间隔（毫秒）' -DefaultValue '0'
+        $script:KomariArgs += '--enable-ping'
+        $script:KomariArgs += '--max-concurrent-pings'
+        $script:KomariArgs += $pingConcurrency
+        $script:KomariArgs += '--ping-min-interval-millis'
+        $script:KomariArgs += $pingMinInterval
+    }
+
+    Update-DerivedValues
+}
+
+function Install-Agent {
+    param([bool]$Interactive)
+
+    if ((Service-Exists) -or (Test-Path -LiteralPath $AgentPath -PathType Leaf)) {
+        Log-Warning 'Agent appears to be installed already. Use upgrade or reconfigure instead of install.'
+        exit 1
+    }
+
+    if ($Interactive) {
+        Collect-InteractiveInstallInputs
+    }
+
+    Ensure-InstallInputs
+    Update-DerivedValues
+    Show-OperationConfiguration -Heading 'Installation configuration:'
+    Prepare-DownloadContext
+    Download-AgentBinary
+    Replace-DownloadedBinary
+    Write-GeneratedConfigIfNeeded
+    Configure-Service
+    Log-Success 'Komari Agent installation completed!'
+    Log-Config "Service name: $ServiceName"
+    Log-Config "Arguments: $RedactedArgString"
+}
+
+function Reconfigure-Agent {
+    param([bool]$Interactive)
+
+    if ($Interactive) {
+        Collect-InteractiveInstallInputs
+    }
+
+    Ensure-InstallInputs
+    Update-DerivedValues
+    Show-OperationConfiguration -Heading 'Reconfiguration:'
+
+    if ((-not (Test-Path -LiteralPath $AgentPath -PathType Leaf)) -or (-not [string]::IsNullOrWhiteSpace($InstallVersion))) {
+        Log-Info 'Agent binary is missing or a target version was requested. Downloading binary before reconfiguring...'
+        Prepare-DownloadContext
+        Download-AgentBinary
+        Replace-DownloadedBinary
+    }
+    else {
+        Log-Info "Reusing existing binary at $AgentPath"
+    }
+
+    Write-GeneratedConfigIfNeeded
+    Configure-Service
+    Log-Success 'Komari Agent reconfiguration completed!'
+}
+
+function Upgrade-Agent {
+    if (-not (Test-Path -LiteralPath $AgentPath -PathType Leaf)) {
+        Log-Error "Agent binary was not found at $AgentPath. Run install first."
+        exit 1
+    }
+
+    Show-OperationConfiguration -Heading 'Upgrade configuration:'
+    Prepare-DownloadContext
+
+    $serviceWasRegistered = Service-Exists
+    if ($serviceWasRegistered) {
+        Log-Step 'Stopping existing service before upgrade...'
+        Stop-RegisteredService
+    }
+
+    $backupPath = "$AgentPath.backup.$([DateTime]::Now.ToString('yyyyMMdd_HHmmss'))"
+    Copy-Item -Path $AgentPath -Destination $backupPath -Force
+    Log-Info "Backed up current binary to $backupPath"
+
+    try {
+        Download-AgentBinary
+        Replace-DownloadedBinary
+    }
+    catch {
+        if ($serviceWasRegistered) {
+            Start-RegisteredService
+        }
+        exit 1
+    }
+
+    if ($serviceWasRegistered) {
+        try {
+            Start-RegisteredService
+        }
+        catch {
+            Log-Error 'Failed to restart the service after upgrade. Restoring previous binary...'
+            Copy-Item -Path $backupPath -Destination $AgentPath -Force
+            Start-RegisteredService
+            exit 1
+        }
+    }
+    else {
+        Log-Warning 'No registered service was found. Binary has been upgraded, but no service restart was performed.'
+    }
+
+    Log-Success 'Komari Agent upgrade completed!'
+}
+
+function Uninstall-Agent {
+    if (-not $AssumeYes) {
+        if (-not (Prompt-YesNo -Prompt '这将卸载 Komari Agent。是否继续' -Default:$false)) {
+            Log-Info '已取消卸载。'
+            return
+        }
+    }
+
+    Remove-ServiceRegistration
+
+    if (Test-Path -LiteralPath $AgentPath -PathType Leaf) {
+        Remove-Item $AgentPath -Force
+        Log-Success "Removed binary: $AgentPath"
+    }
+
+    if (Test-Path -LiteralPath $LegacyTokenFile -PathType Leaf) {
+        Remove-Item $LegacyTokenFile -Force
+    }
+
+    if ($PurgeConfig -and (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
+        Remove-Item $ConfigFile -Force
+        Log-Success "Removed config file: $ConfigFile"
+    }
+    elseif (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+        Log-Warning "Preserved config file: $ConfigFile"
+        Log-Info 'Use --purge-config if you also want to delete the saved config file.'
+    }
+
+    Log-Success 'Komari Agent uninstall completed!'
+}
+
+function Restart-Agent {
+    if (-not (Service-Exists)) {
+        Log-Error "Service $ServiceName was not found."
+        exit 1
+    }
+    Restart-RegisteredService
+    Log-Success "Service restarted: $ServiceName"
+}
+
+function Stop-Agent {
+    if (-not (Service-Exists)) {
+        Log-Error "Service $ServiceName was not found."
+        exit 1
+    }
+    Stop-RegisteredService
+    Log-Success "Service stopped: $ServiceName"
+}
+
+function Show-Menu {
+    Show-Banner
+    Write-Host '请选择操作：'
+    Write-Host '  1) 安装 Agent'
+    Write-Host '  2) 升级 Agent'
+    Write-Host '  3) 重配 Agent'
+    Write-Host '  4) 卸载 Agent'
+    Write-Host '  5) 查看状态'
+    Write-Host '  6) 查看日志'
+    Write-Host '  7) 重启服务'
+    Write-Host '  8) 停止服务'
+    Write-Host '  9) 退出'
+    Write-Host ''
+
+    switch (Read-Host '输入选项 [1-9]') {
+        '1' { Install-Agent -Interactive:$true }
+        '2' { Upgrade-Agent }
+        '3' { Reconfigure-Agent -Interactive:$true }
+        '4' { Uninstall-Agent }
+        '5' { Show-ServiceStatus }
+        '6' { Show-ServiceLogs }
+        '7' { Restart-Agent }
+        '8' { Stop-Agent }
+        '9' { return }
+        default {
+            Log-Error '无效选项'
+            exit 1
+        }
+    }
+}
+
+switch ($Operation) {
+    'help' { Show-Usage }
+    'menu' { Show-Menu }
+    'install' { Install-Agent -Interactive:$false }
+    'upgrade' { Upgrade-Agent }
+    'reconfigure' { Reconfigure-Agent -Interactive:$false }
+    'uninstall' { Uninstall-Agent }
+    'status' { Show-ServiceStatus }
+    'logs' { Show-ServiceLogs }
+    'restart' { Restart-Agent }
+    'stop' { Stop-Agent }
+    default {
+        Log-Error "Unsupported operation: $Operation"
+        exit 1
+    }
+}
