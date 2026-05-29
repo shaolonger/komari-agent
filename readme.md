@@ -23,6 +23,7 @@
 ## 当前 fork 的远控与延迟监测默认行为
 
 - 当前 `shaolonger/komari-agent` fork 默认只开启基础监控上报；远程终端、远程命令执行和远程 ping 探测都需要显式开启。
+- 当前 fork 的自更新与安装脚本都以 `shaolonger/komari-agent` 的 GitHub Releases 为准；如果你维护的是别的 fork，请同步调整发布仓库、安装脚本和自动更新目标。
 - 如果你要在 Komari 面板里使用“延迟监测”或批量 TCP/HTTP Ping，请显式设置 `enable_ping=true` 或启动参数 `--enable-ping`。只有在你确实要开放完整远控面时，才建议使用 `--enable-remote-control`。
 - `ignore_unsafe_cert` 仍然会禁用远程终端、远程命令执行和远程 ping；它适合作为临时测试手段，不应作为生产环境常态配置。
 - `max_control_requests` / `control_request_window` 现在只用于远程终端和远程命令执行的控制面限流；ping 探测改为只受 `max_concurrent_pings`、`ping_min_interval_millis`、目标白名单与端口白名单约束，避免批量延迟监测被通用控制面限流误判为丢包。
