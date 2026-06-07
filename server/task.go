@@ -31,7 +31,7 @@ const defaultTaskConcurrencyLimit = 1
 const defaultMaxConcurrentPings = 2
 const defaultPingMinInterval = 500 * time.Millisecond
 
-var defaultAllowedPingTypes = []string{"tcp", "http"}
+var defaultAllowedPingTypes = []string{"tcp", "http", "icmp"}
 var defaultAllowedPingTCPPorts = []int{80, 443}
 
 var taskExecutionTimeout = defaultTaskExecutionTimeout

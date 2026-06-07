@@ -169,7 +169,7 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.EnableTerminal, "enable-terminal", false, "Explicitly enable remote terminal access")
 	RootCmd.PersistentFlags().BoolVar(&flags.EnablePing, "enable-ping", false, "Explicitly enable remote ping tasks")
 	RootCmd.PersistentFlags().BoolVar(&flags.AllowPrivatePingTargets, "allow-private-ping-targets", false, "Allow pinging private or otherwise sensitive addresses")
-	RootCmd.PersistentFlags().StringVar(&flags.AllowedPingTypes, "allowed-ping-types", "tcp,http", "Comma-separated ping types allowed when remote ping is enabled")
+	RootCmd.PersistentFlags().StringVar(&flags.AllowedPingTypes, "allowed-ping-types", "tcp,http,icmp", "Comma-separated ping types allowed when remote ping is enabled")
 	RootCmd.PersistentFlags().StringVar(&flags.AllowedPingTCPPorts, "allowed-ping-tcp-ports", "80,443", "Comma-separated TCP/HTTP ports allowed for remote ping")
 	RootCmd.PersistentFlags().IntVar(&flags.MaxConcurrentPings, "max-concurrent-pings", 2, "Maximum number of concurrent ping tasks per agent")
 	RootCmd.PersistentFlags().IntVar(&flags.PingMinIntervalMillis, "ping-min-interval-millis", 500, "Minimum interval between accepted ping tasks in milliseconds")

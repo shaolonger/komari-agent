@@ -81,7 +81,7 @@ func (config *Config) AutoUpdateEnabled() bool {
 
 var GlobalConfig = &Config{
 	DisableWebSsh:         true,
-	AllowedPingTypes:      "tcp,http",
+	AllowedPingTypes:      "tcp,http,icmp",
 	AllowedPingTCPPorts:   "80,443",
 	MaxConcurrentPings:    2,
 	PingMinIntervalMillis: 500,
