@@ -16,24 +16,19 @@ import (
 
 var flags = pkg_flags.GlobalConfig
 
-func DoUploadBasicInfoWorks() {
-	ticker := time.NewTicker(time.Duration(flags.InfoReportInterval) * time.Minute)
-	for range ticker.C {
-		err := uploadBasicInfo()
-		if err != nil {
-			log.Println("Error uploading basic info:", err)
-		}
+func buildCapabilityPayload() map[string]interface{} {
+	return map[string]interface{}{
+		"capability_ping":                 flags.PingEnabled(),
+		"capability_terminal":             flags.TerminalEnabled(),
+		"capability_remote_exec":          flags.RemoteExecEnabled(),
+		"capability_remote_control":       flags.RemoteControlEnabled(),
+		"capability_gpu":                  flags.EnableGPU,
+		"capability_auto_update":          flags.AutoUpdateEnabled(),
+		"capability_private_ping_targets": flags.AllowPrivatePingTargets,
 	}
 }
-func UpdateBasicInfo() {
-	err := uploadBasicInfo()
-	if err != nil {
-		log.Println("Error uploading basic info:", err)
-	} else {
-		log.Println("Basic info uploaded successfully")
-	}
-}
-func uploadBasicInfo() error {
+
+func buildBasicInfoPayload() map[string]interface{} {
 	cpu := monitoring.Cpu()
 
 	osname := monitoring.OSName()
@@ -56,11 +51,41 @@ func uploadBasicInfo() error {
 		"version":        update.CurrentVersion,
 	}
 
+	for key, value := range buildCapabilityPayload() {
+		data[key] = value
+	}
+
+	return data
+}
+
+func DoUploadBasicInfoWorks() {
+	ticker := time.NewTicker(time.Duration(flags.InfoReportInterval) * time.Minute)
+	for range ticker.C {
+		err := uploadBasicInfo()
+		if err != nil {
+			log.Println("Error uploading basic info:", err)
+		}
+	}
+}
+func UpdateBasicInfo() {
+	err := uploadBasicInfo()
+	if err != nil {
+		log.Println("Error uploading basic info:", err)
+	} else {
+		log.Println("Basic info uploaded successfully")
+	}
+}
+func uploadBasicInfo() error {
+	data := buildBasicInfoPayload()
+
 	// 尝试上传完整数据
 	err := tryUploadData(data)
 	if err != nil {
 		// 兼容 <= 1.0.2
 		delete(data, "kernel_version")
+		for key := range buildCapabilityPayload() {
+			delete(data, key)
+		}
 		err = tryUploadData(data)
 		if err != nil {
 			return err
