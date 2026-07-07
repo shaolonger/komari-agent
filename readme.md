@@ -14,7 +14,7 @@
 - Linux / macOS 上如果通过 `bash <(curl ...)` 或 `./install.sh` 由普通用户启动系统级安装，`install.sh` 会自动暂存当前脚本并通过 `sudo` 续跑；若环境没有 `sudo`，再改为手工使用 root 执行。
 - 远程终端、远程命令执行和 ping 探测默认禁用；优先按需分别启用 `--enable-terminal`、`--enable-remote-exec`、`--enable-ping`，只有确实需要完整远控面时才使用 `--enable-remote-control`。
 - 如果显式开启远程终端，默认仍会施加每台 agent 最多 1 个终端会话、300 秒空闲超时、1800 秒最大会话时长；如确有需要，再通过 `--max-terminal-sessions`、`--terminal-idle-timeout`、`--terminal-max-duration` 调整。
-- 如果显式开启 ping 探测，默认只允许 `tcp,http` 两类探测、只允许 `80,443` 端口、默认拒绝私有/环回/链路本地等敏感地址，并且会施加 `--max-concurrent-pings` 与 `--ping-min-interval-millis` 限制；只有在业务明确需要时才通过对应参数放宽。
+- 如果显式开启 ping 探测，默认只允许 `tcp,http,icmp` 三类探测、只允许 `80,443,8443` 端口、默认拒绝私有/环回/链路本地等敏感地址，并且会施加 `--max-concurrent-pings` 与 `--ping-min-interval-millis` 限制；只有在业务明确需要时才通过对应参数放宽。
 - agent 还会对控制请求施加基础速率限制，默认 10 秒窗口内最多接受 10 个控制请求；如确有需要，可用 `--max-control-requests` 和 `--control-request-window` 调整。
 - 如果需要保留任务命令审计，使用显式开关 `--audit-task-commands`，并假定日志只用于受控审计面，因为命令文本会经过脱敏后落日志。
 - 如环境不允许自动更新，使用 `--disable-auto-update`，改为人工审批并配合下面的离线校验流程执行升级。
@@ -62,8 +62,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.git
 如果同一台节点要同时执行多条相同 `interval` 的延迟监测任务，请至少确认以下几点：
 
 - `enable_ping=true`
-- `allowed_ping_types` 覆盖你实际要用的类型，默认仅 `tcp,http`
-- `allowed_ping_tcp_ports` 覆盖你实际要探测的端口，默认仅 `80,443`
+- `allowed_ping_types` 覆盖你实际要用的类型，默认仅 `tcp,http,icmp`
+- `allowed_ping_tcp_ports` 覆盖你实际要探测的端口，默认仅 `80,443,8443`
 - `max_concurrent_pings` 大于等于同一轮可能同时下发到该节点的任务数
 - `ping_min_interval_millis=0`，用于显式关闭每台 agent 的最小接收间隔限制
 
@@ -77,7 +77,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.git
 	"token": "replace-with-real-token",
 	"enable_ping": true,
 	"allowed_ping_types": "tcp,http",
-	"allowed_ping_tcp_ports": "80,443",
+	"allowed_ping_tcp_ports": "80,443,8443",
 	"max_concurrent_pings": 24,
 	"ping_min_interval_millis": 0
 }

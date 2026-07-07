@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/netip"
 	"net/http"
+	"net/netip"
 	"os/exec"
-	"strconv"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +32,7 @@ const defaultMaxConcurrentPings = 2
 const defaultPingMinInterval = 500 * time.Millisecond
 
 var defaultAllowedPingTypes = []string{"tcp", "http", "icmp"}
-var defaultAllowedPingTCPPorts = []int{80, 443}
+var defaultAllowedPingTCPPorts = []int{80, 443, 8443}
 
 var taskExecutionTimeout = defaultTaskExecutionTimeout
 var taskOutputLimit = defaultTaskOutputLimit
@@ -177,10 +177,10 @@ func collectTaskOutput(stdout, stderr taskOutputBuffer) string {
 }
 
 type taskOutputBuffer struct {
-	buffer    bytes.Buffer
-	limit     int
+	buffer     bytes.Buffer
+	limit      int
 	totalBytes int
-	truncated bool
+	truncated  bool
 }
 
 func newTaskOutputBuffer(limit int) taskOutputBuffer {

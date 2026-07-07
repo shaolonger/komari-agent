@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -84,6 +85,17 @@ func TestPingTargetAllowedRejectsDisallowedTypeAndPort(t *testing.T) {
 	}
 	if err := pingTargetAllowed("tcp", "8.8.8.8:22"); err == nil {
 		t.Fatal("expected tcp ping to a disallowed port to be rejected")
+	}
+}
+
+func TestPingAllowedPortsIncludesDefaultWebPorts(t *testing.T) {
+	useServerFlagsSnapshot(t)
+
+	flags.AllowedPingTCPPorts = ""
+
+	want := []int{80, 443, 8443}
+	if got := pingAllowedPorts(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pingAllowedPorts() = %v, want %v", got, want)
 	}
 }
 
