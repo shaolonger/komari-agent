@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -67,29 +66,21 @@ func newTerminalImpl() (*terminalImpl, error) {
 		return nil, fmt.Errorf("no supported shell found among %v", defaultShells)
 	}
 
-	shellArgv0 := filepath.Base(shell)
-	shellCmd := "for f in /etc/update-motd.d/*; do [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$0\""
-
-	cmd := exec.Command(shell, "-c", shellCmd)
-	cmd.Args[0] = shellArgv0
-	cmd.Env = append(os.Environ(), // 继承系统环境变量
-		"TERM=xterm-256color", // 设置终端类型，提高兼容性
-		"LANG=C.UTF-8",        // 设置语言环境为 UTF-8
-		"LC_ALL=C.UTF-8",      // 强制所有本地化变量为 UTF-8
-	)
+	// Start the selected shell itself as an interactive process. The previous
+	// `shell -c "...; exec $0"` prelude could consume the PTY input as the
+	// command shell exited, leaving the replacement shell at EOF immediately.
+	// It also forced C.UTF-8, which is not a valid locale on every Unix host.
+	cmd := exec.Command(shell, "-i")
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	tty, err := pty.Start(cmd)
 	if err != nil {
 		// 回退到原始启动逻辑（直接启动 shell，再无参数）
 		cmd = exec.Command(shell)
-		cmd.Env = append(os.Environ(),
-			"TERM=xterm-256color",
-			"LANG=C.UTF-8",
-			"LC_ALL=C.UTF-8",
-		)
+		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 		tty, err = pty.Start(cmd)
 		if err != nil {
-			return nil, fmt.Errorf("failed to start pty with argv0 prelude and plain shell: %v", err)
+			return nil, fmt.Errorf("failed to start interactive and plain shell in pty: %v", err)
 		}
 	}
 
