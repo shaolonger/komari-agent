@@ -1,6 +1,8 @@
 module github.com/komari-monitor/komari-agent
 
-go 1.23.2
+go 1.26.0
+
+toolchain go1.26.5
 
 require (
 	github.com/UserExistsError/conpty v0.1.4

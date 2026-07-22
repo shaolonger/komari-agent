@@ -17,7 +17,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26.5"
 
       - name: Run security regression blockers
         shell: pwsh
@@ -34,10 +34,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26.5"
 
       - name: Run unit tests
         run: go test ./...
+
+      - name: Verify reproducible PGO release build
+        run: ./scripts/verify-reproducible-build.sh
 
   build:
     needs:
@@ -64,7 +67,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26.5"
 
       - name: Build binary
         env:
@@ -77,7 +80,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME=${BINARY_NAME}.exe
           fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
+          ./scripts/build-release.sh "$BINARY_NAME" "$VERSION" "${{ github.sha }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

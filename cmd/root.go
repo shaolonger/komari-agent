@@ -135,7 +135,7 @@ func runAgent(ctx context.Context) error {
 		}
 	}
 
-	log.Println("Komari Agent", update.CurrentVersion)
+	log.Println("Komari Agent", update.CurrentVersion, "commit", update.BuildCommit)
 	log.Println("Github Repo:", update.Repo)
 
 	// 设置 DNS 解析行为

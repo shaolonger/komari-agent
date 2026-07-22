@@ -455,3 +455,29 @@ Agent 现在只在启动边界接受一份通过统一校验的外部配置。�
 - 基础信息和更新 ticker 取消、自动更新完成返回 42 前不跳过清理；
 - 慢命令取消、等待执行 slot 取消、控制 worker deadline、忽略 context 的 sampler 和阻塞 netstatic 保存；
 - 最终保存错误传播、后台 worker join、总关闭 timeout、专项 race、全量 unit/vet/race 与四平台静态构建。
+
+## A-402 可复现构建、二进制瘦身和 PGO
+
+发布工具链已从失去安全维护的 Go 1.23 统一升级并锁定为 Go 1.26.5：`go.mod` 使用 Go 1.26 language version 和 `toolchain go1.26.5`，全部 build、security、network、binary release 和 container workflow 也使用精确的 1.26.5，不再使用会随时间漂移的 `1.23`。选择依据是 [Go 官方发布历史](https://go.dev/doc/devel/release)：1.26.5 包含 `crypto/tls`、`os`、compiler、runtime、`net` 和 `syscall` 修复；官方只支持最新两个 Go 大版本，因此继续发布 1.23 二进制会形成安全维护缺口。
+
+所有原生和容器二进制统一通过 [`scripts/build-release.sh`](scripts/build-release.sh) 构建，固定执行：
+
+- `-mod=readonly`，禁止发布任务隐式改写依赖图；
+- `-trimpath -buildvcs=false`，移除 checkout 绝对路径和环境相关 VCS 元数据；
+- `-pgo=default.pgo`，使用受版本控制的代表性 profile；
+- `-ldflags="-s -w -buildid= ..."`，删除符号/调试表和非必要 build ID；
+- 通过只允许安全字符的参数注入稳定 Version 与 Commit，拒绝 ldflags metadata 注入；
+- `CGO_ENABLED=0`，保持单文件静态跨平台交付。
+
+`default.pgo` 由 Go 1.26.5 在 `GOMAXPROCS=1` 下采集并合并三类稳定热路径：v1/v2 report 编码、Ping policy/client cache 与 outbound queue、netstatic prefix query。[`scripts/generate-default-pgo.sh`](scripts/generate-default-pgo.sh) 完整记录了可重复生成方法；profile 经过 `go tool pprof` smoke，所有目标通过 `go version -m` 确认实际包含 `-pgo=default.pgo`。Apple M4 上 PGO 后 v1 encoder 从约 621.5～626.7ns 降到 577.8～585.7ns（约 6～8%），v2 encoder 从约 65.7～71.3ns 到 63.2～69.2ns；分配不变。微小 queue/cache 项存在调度噪声，因此 PGO 验收以代表性编码收益和全量回归为准，不声称所有纳秒级 microbenchmark 都单调改善。
+
+[`scripts/verify-reproducible-build.sh`](scripts/verify-reproducible-build.sh) 使用相同 Version、Commit、profile 连续构建两次并逐字节 `cmp`，同时确认 build ID 为空、PGO 元数据存在、注入 metadata 存在且二进制可执行。当前 darwin/arm64 两份产物完全一致；`-s -w` 产物为 8,411,122 bytes，对照未 strip 的 12,230,914 bytes，减少约 31.2%。PGO 相对同样 strip 的 non-PGO 二进制只增加约 16KiB（约 0.2%）。
+
+供应链门禁没有放宽。新增 PowerShell policy guard 强制检查精确工具链、集中构建脚本、PGO、strip/trimpath/build ID、checksum 和 cosign；release 在上传前先执行 `sha256sum -c`，再以 GitHub OIDC certificate identity/issuer 约束执行 `cosign verify-blob`。原 checksum、`.sig`、`.pem` 资产和安装器校验保持；Docker workflow 也改为 release published 自动触发并复用同一 PGO 二进制构建器。
+
+验收包括：
+
+- 两次 byte-for-byte 重复构建、空 build ID、Version/Commit 注入、PGO metadata 与 `--help` smoke；
+- PGO on/off report、queue、Ping cache 与 netstatic benchmark；
+- Linux amd64/arm64、Windows amd64、FreeBSD amd64 的集中脚本交叉构建与静态/strip 检查；
+- 全量 release matrix、unit/vet/race、PGO test、workflow syntax 和安全脚本在 A-403 发布验收中再次执行。

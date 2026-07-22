@@ -138,7 +138,7 @@
   - 有界等待 sampler、队列、netstatic 和连接关闭。
   - 测试：非法配置、SIGTERM、超时任务、保存失败、退出码、race。
 
-- [ ] **A-402 可复现构建、二进制瘦身和 PGO**
+- [x] **A-402 可复现构建、二进制瘦身和 PGO**
   - Go toolchain 与 go.mod/CI 对齐。
   - release 使用 `-trimpath -s -w`、稳定版本元数据和代表性 PGO。
   - 保持 checksum/signature/cosign 供应链门禁。

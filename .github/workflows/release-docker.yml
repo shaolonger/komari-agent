@@ -1,7 +1,13 @@
 name: Publish Docker Image
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version metadata for a manual image build
+        required: false
 
 permissions:
   contents: read
@@ -25,24 +31,23 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26.5"
 
       - name: Build static binaries for multi-arch
         env:
           GOOS: linux
           CGO_ENABLED: 0
         run: |
-          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${{ github.event.release.tag_name || inputs.version }}"
           if [ -z "$VERSION" ]; then
             VERSION="${{ github.sha }}"
           fi
-          LDFLAGS="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}"
 
           echo "Building for linux/amd64..."
-          GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o komari-agent-linux-amd64
+          GOARCH=amd64 ./scripts/build-release.sh komari-agent-linux-amd64 "$VERSION" "${{ github.sha }}"
 
           echo "Building for linux/arm64..."
-          GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o komari-agent-linux-arm64
+          GOARCH=arm64 ./scripts/build-release.sh komari-agent-linux-arm64 "$VERSION" "${{ github.sha }}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -63,7 +68,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ github.event.release.tag_name }}
+            type=raw,value=${{ github.event.release.tag_name || inputs.version || github.sha }}
             type=raw,value=latest
 
       - name: Build and push Docker image

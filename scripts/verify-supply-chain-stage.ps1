@@ -41,8 +41,12 @@ try {
     Assert-PowerShellScriptParses (Join-Path $repoRoot 'install.ps1')
     Assert-PowerShellScriptParses (Join-Path $PSScriptRoot 'verify-install-ps1-integrity.ps1')
     Assert-PowerShellScriptParses (Join-Path $PSScriptRoot 'verify-supply-chain-stage.ps1')
+    Assert-PowerShellScriptParses (Join-Path $PSScriptRoot 'verify-release-build-policy.ps1')
     Assert-BashScriptParses -Path (Join-Path $repoRoot 'install.sh') -BashExecutable $bashCommand.Source
     Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'verify-install-sh-integrity.sh') -BashExecutable $bashCommand.Source
+    Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'build-release.sh') -BashExecutable $bashCommand.Source
+    Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'generate-default-pgo.sh') -BashExecutable $bashCommand.Source
+    Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'verify-reproducible-build.sh') -BashExecutable $bashCommand.Source
 
     if (-not $SkipLiveReleaseCheck) {
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/shaolonger/komari-agent/releases/latest' -UseBasicParsing
@@ -68,6 +72,11 @@ try {
     & go test ./update
     if ($LASTEXITCODE -ne 0) {
         throw 'go test ./update failed'
+    }
+
+    & (Join-Path $PSScriptRoot 'verify-release-build-policy.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'verify-release-build-policy.ps1 failed'
     }
 
     & (Join-Path $PSScriptRoot 'verify-install-ps1-integrity.ps1')

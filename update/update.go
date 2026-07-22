@@ -17,6 +17,7 @@ import (
 var (
 	CurrentVersion string = "v1.2.4"
 	Repo           string = "shaolonger/komari-agent"
+	BuildCommit    string = "unknown"
 )
 
 const RestartExitCode = 42
