@@ -112,7 +112,7 @@
   - 外部命令 context、输出上限、错误 backoff；空 GPU 不产生 NaN。
   - 测试：无 GPU、NVIDIA/AMD fixture、超时、大输出、多卡、benchmark。
 
-- [ ] **A-302 Ping 配置预编译与 DNS/IP 固定安全连接**
+- [x] **A-302 Ping 配置预编译与 DNS/IP 固定安全连接**
   - allowed types/ports immutable set。
   - 验证全部解析地址并固定通过验证的地址。
   - 保留 HTTPS SNI/校验，重定向禁止或逐跳验证。

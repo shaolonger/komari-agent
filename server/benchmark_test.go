@@ -15,6 +15,8 @@ var (
 	benchmarkFrame   outboundFrame
 	benchmarkWriter  outboundBenchmarkWriter = discardOutboundBenchmarkWriter{}
 	benchmarkStatic  staticBasicInfo
+	benchmarkPolicy  *compiledPingPolicy
+	benchmarkTarget  *resolvedPingTarget
 )
 
 type outboundBenchmarkWriter interface {
@@ -55,6 +57,37 @@ func BenchmarkStaticBasicInfoCacheHit(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		benchmarkStatic = cache.Get()
+	}
+}
+
+func BenchmarkPingPolicyCompile(b *testing.B) {
+	key := pingPolicyKey{types: "tcp,http,icmp", ports: "80,443,8443"}
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkPolicy = compilePingPolicy(key)
+	}
+}
+
+func BenchmarkPingPolicyCacheHit(b *testing.B) {
+	original := *flags
+	flags.AllowedPingTypes = "tcp,http,icmp"
+	flags.AllowedPingTCPPorts = "80,443,8443"
+	flags.AllowPrivatePingTargets = false
+	b.Cleanup(func() { *flags = original })
+	benchmarkPolicy = currentPingPolicy()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkPolicy = currentPingPolicy()
+	}
+}
+
+func BenchmarkPrepareLiteralPingTarget(b *testing.B) {
+	policy := testPingPolicy("tcp", "443", false)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkTarget, _ = preparePingTarget(context.Background(), policy, "tcp", "8.8.8.8:443", nil)
 	}
 }
 

@@ -352,3 +352,32 @@ Apple M4/macOS、`GOMAXPROCS=1`、500,000 次稳态 benchmark：
 - NVIDIA/AMD 双卡乱序 fixture、UUID/card ID 对齐、N/A 指标、畸形字段、NaN、显存矛盾和响应上限；
 - 真实 helper 子进程的 context 强制终止和 1MiB 输出炸弹；空设备报告保持平均值 0，不产生 NaN；
 - 专项测试 10 次、专项 race 5 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
+
+## A-302 Ping 配置预编译与 DNS/IP 固定安全连接
+
+Ping 授权不再为每个任务重复 `Split`/`Atoi` 类型和端口字符串。当前类型、端口、私网开关组成配置 key，首次使用编译为不可变 type bitmask 与端口 set，并通过 atomic pointer 发布；同配置并发读取复用同一快照。只接受 `tcp/http/icmp`，空配置保留原默认值，非空但无效或超过 1KB 的配置 fail closed；最多允许 128 个端口。最大并发被硬限制为 64，最小任务间隔被限制在 0～1 小时，异常大数无法造成 channel 巨额分配或 duration 溢出。
+
+旧路径在授权时只检查 DNS 的第一个地址，执行 ICMP/TCP/HTTP 时再次解析，存在混合公私记录和 DNS rebinding 的 TOCTOU。新路径把任务构造成不可变 target：解析一次 hostname，最多接收 32 个地址，逐个执行 `netip` 校验；只要任意答案属于 loopback、private、link-local、CGNAT、benchmark、documentation 或其他保留范围，整个任务就拒绝。重复项去除后固定第一个已验证地址，后续 ICMP、TCP 和 HTTP 都只使用该数值 IP，不再查询 DNS。IPv4-mapped 地址先 unmap；显式私网 opt-in 仍拒绝 unspecified 和 multicast。
+
+DNS 解析在类型/端口检查、并发 slot 和频率限制之后执行，服从 3 秒 context，并继续使用自定义 DNS 配置。错误对日志只暴露通用类别，不转发 resolver 的潜在敏感细节。hostname 经过 IDNA Lookup 规范化，HTTP 只接受 `http`/`https`，拒绝 userinfo、非法端口、超长 target 和 scoped IPv6 URL。
+
+HTTP 请求保留原始规范化 hostname 作为 URL Host；Transport 关闭代理并只拨固定 IP/端口。HTTPS 显式使用原 hostname 作为 SNI/证书名，最低 TLS 1.2，绝不继承 `--ignore-unsafe-cert`。全部 redirect 禁止跟随，3xx 作为失败，因此 redirect 到私网、不同端口或新域名均不能触发第二次连接。响应头限制为 64KB；A-303 继续负责请求方法、正文边界和跨任务连接复用。
+
+Apple M4/macOS、`GOMAXPROCS=1`、500,000 次稳态 benchmark：
+
+| Hot path | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| policy compile（配置变更路径） | 184～240 | 256 | 5 |
+| policy cache hit（每任务） | 3.33～4.03 | 0 | 0 |
+| literal target 解析、全校验与 pin | 163～176 | 128 | 3 |
+
+策略热读取相对每次重新编译快约 46～72×并消除全部临时分配。域名任务的主要成本仍是一次真实 DNS lookup；安全 pin 不增加第二次解析。
+
+正确性、安全和资源边界验证包括：
+
+- 64 路相同配置并发读取同一 policy pointer，配置变更生成新快照，invalid/oversized 配置 fail closed；
+- IPv4/IPv6 混合公私答案整体拒绝、空/超过 32 个答案拒绝、保留地址矩阵和显式私网边界；
+- scripted DNS rebinding 只调用一次 resolver，真实本地 TCP 连接严格使用第一次固定地址；
+- DNS context 取消和 resolver 错误脱敏，IPv6 URL/端口、IDNA、类型/端口、并发/频率限制；
+- redirect 私网服务零请求且源站只访问一次；真实 TLS 握手验证 SNI、Host、TLS 1.2 和证书链；
+- 专项测试 20 次、专项 race 10 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
