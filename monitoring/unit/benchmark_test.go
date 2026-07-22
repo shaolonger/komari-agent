@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"bytes"
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ var (
 	benchmarkNetworkDown uint64
 	benchmarkProcNetRows int
 	benchmarkPIDCount    int
+	benchmarkIPAddress   ipAddressResult
 )
 
 func BenchmarkCPU(b *testing.B) {
@@ -62,6 +64,29 @@ func BenchmarkStaticHostInfoCached(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		benchmarkStaticHost = GetStaticHostInfo()
+	}
+}
+
+func BenchmarkPublicIPCacheHit(b *testing.B) {
+	cache := newPublicIPCache(time.Now, time.Hour, time.Minute)
+	key := ipAddressOptions{}
+	loader := func(context.Context) ipAddressResult {
+		return ipAddressResult{ipv4: "8.8.8.8", ipv6: "2606:4700:4700::1111"}
+	}
+	benchmarkIPAddress = cache.Resolve(context.Background(), key, loader)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkIPAddress = cache.Resolve(context.Background(), key, loader)
+	}
+}
+
+func BenchmarkExtractPublicIPAddress(b *testing.B) {
+	body := []byte(`{"ip":"2606:4700:4700::1111","country":"US"}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for range b.N {
+		_, _ = extractPublicIPAddress(body, ipFamilyV6)
 	}
 }
 

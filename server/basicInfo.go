@@ -10,7 +10,6 @@ import (
 
 	"github.com/komari-monitor/komari-agent/diagnostics"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
-	"github.com/komari-monitor/komari-agent/update"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
@@ -30,14 +29,14 @@ func buildCapabilityPayload() map[string]interface{} {
 }
 
 func buildBasicInfoPayload() map[string]interface{} {
-	static := monitoring.GetStaticHostInfo()
+	static := defaultStaticBasicInfoCache.Get()
 	memory := monitoring.Memory()
 	ipv4, ipv6, _ := monitoring.GetIPAddress()
 
 	data := map[string]interface{}{
 		"cpu_name":       static.CPUName,
 		"cpu_cores":      static.CPUCores,
-		"arch":           static.CPUArchitecture,
+		"arch":           static.Architecture,
 		"os":             static.OSName,
 		"kernel_version": static.KernelVersion,
 		"ipv4":           ipv4,
@@ -45,9 +44,9 @@ func buildBasicInfoPayload() map[string]interface{} {
 		"mem_total":      memory.RAM.Total,
 		"swap_total":     memory.Swap.Total,
 		"disk_total":     monitoring.Disk().Total,
-		"gpu_name":       monitoring.GpuName(),
+		"gpu_name":       static.GPUName,
 		"virtualization": static.Virtualization,
-		"version":        update.CurrentVersion,
+		"version":        static.AgentVersion,
 	}
 
 	for key, value := range buildCapabilityPayload() {

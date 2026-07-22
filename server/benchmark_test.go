@@ -14,6 +14,7 @@ var (
 	benchmarkHeaders http.Header
 	benchmarkFrame   outboundFrame
 	benchmarkWriter  outboundBenchmarkWriter = discardOutboundBenchmarkWriter{}
+	benchmarkStatic  staticBasicInfo
 )
 
 type outboundBenchmarkWriter interface {
@@ -42,6 +43,18 @@ func BenchmarkNewJSONClientRequest(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 	for range b.N {
 		benchmarkRequest, _ = newJSONClientRequest(http.MethodPost, endpoint, payload)
+	}
+}
+
+func BenchmarkStaticBasicInfoCacheHit(b *testing.B) {
+	cache := newStaticBasicInfoCache(func() staticBasicInfo {
+		return staticBasicInfo{CPUName: "benchmark CPU", GPUName: "benchmark GPU"}
+	})
+	benchmarkStatic = cache.Get()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkStatic = cache.Get()
 	}
 }
 
