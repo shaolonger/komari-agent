@@ -10,13 +10,14 @@ import (
 )
 
 var (
-	benchmarkRequest *http.Request
-	benchmarkHeaders http.Header
-	benchmarkFrame   outboundFrame
-	benchmarkWriter  outboundBenchmarkWriter = discardOutboundBenchmarkWriter{}
-	benchmarkStatic  staticBasicInfo
-	benchmarkPolicy  *compiledPingPolicy
-	benchmarkTarget  *resolvedPingTarget
+	benchmarkRequest        *http.Request
+	benchmarkHeaders        http.Header
+	benchmarkFrame          outboundFrame
+	benchmarkWriter         outboundBenchmarkWriter = discardOutboundBenchmarkWriter{}
+	benchmarkStatic         staticBasicInfo
+	benchmarkPolicy         *compiledPingPolicy
+	benchmarkTarget         *resolvedPingTarget
+	benchmarkPingHTTPClient *http.Client
 )
 
 type outboundBenchmarkWriter interface {
@@ -88,6 +89,35 @@ func BenchmarkPrepareLiteralPingTarget(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		benchmarkTarget, _ = preparePingTarget(context.Background(), policy, "tcp", "8.8.8.8:443", nil)
+	}
+}
+
+func BenchmarkBuildPinnedPingHTTPClient(b *testing.B) {
+	policy := testPingPolicy("http", "443", false)
+	target, err := preparePingTarget(context.Background(), policy, "http", "https://8.8.8.8/health", nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkPingHTTPClient = buildPinnedHTTPClient(target, pingProbeTimeout)
+	}
+}
+
+func BenchmarkPingHTTPClientCacheHit(b *testing.B) {
+	policy := testPingPolicy("http", "443", false)
+	target, err := preparePingTarget(context.Background(), policy, "http", "https://8.8.8.8/health", nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	cache := newPingHTTPClientCache(64, time.Hour, time.Now)
+	b.Cleanup(cache.Clear)
+	benchmarkPingHTTPClient = cache.Get(target)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkPingHTTPClient = cache.Get(target)
 	}
 }
 

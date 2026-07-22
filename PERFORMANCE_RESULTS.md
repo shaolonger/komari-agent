@@ -381,3 +381,33 @@ Apple M4/macOS、`GOMAXPROCS=1`、500,000 次稳态 benchmark：
 - DNS context 取消和 resolver 错误脱敏，IPv6 URL/端口、IDNA、类型/端口、并发/频率限制；
 - redirect 私网服务零请求且源站只访问一次；真实 TLS 握手验证 SNI、Host、TLS 1.2 和证书链；
 - 专项测试 20 次、专项 race 10 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
+
+## A-303 Ping HTTP/TCP 受控连接复用与执行预算
+
+HTTP Ping 不再每次分配新的 `http.Client`/`Transport` 并立即丢弃连接池。现在以 `(scheme, normalized hostname, port, pinned IP)` 作为完整安全 key：只有域名身份和 A-302 已验证地址都相同的任务才共享 client；同域名 DNS 切换到新 IP、同 IP 不同 TLS/Host 身份、HTTP/HTTPS 或端口变化都会使用物理隔离的 Transport。缓存最多 64 项、TTL 10 分钟、确定性 LRU，过期/淘汰/清空会关闭 idle connections。
+
+每个 target pool 最多 4 条连接、2 条 idle connection，idle 90 秒；代理关闭，TLS SNI/验证、最低 TLS 1.2、固定 endpoint 与 redirect 禁止继续继承 A-302 的安全边界。同一已验证目标的连续 HEAD 探测在真实本地集成测试中只创建 1 条 TCP connection。TCP handshake 探测为保持语义仍会创建新连接，但复用并发安全的长期 `net.Dialer` 配置，不把已连接 socket 冒充新的握手延迟。
+
+HTTP 首先发送 HEAD，因此正常 endpoint 不读取任何正文。仅当服务端明确返回 405/501 时，才在同一个 attempt context 内发送 `GET` + `Range: bytes=0-0` + `Accept-Encoding: identity`；响应正文立即关闭，不会因为服务端忽略 Range、返回 chunked 流或无限慢正文而下载无界数据。响应头继续限制为 64KB，只有 2xx 成功；3xx 不跟随，其他状态直接失败。
+
+每个任务现在共享一个 10 秒 parent budget：DNS 阶段最多 3 秒，每次 ICMP/TCP/HTTP attempt 最多 3 秒，最多三次高延迟复测也不能把 timeout 串行累加到 parent deadline 之外。ICMP 改用 `RunWithContext`，TCP/HTTP dial 和读取同样从 parent 派生。
+
+延迟语义固定为：ICMP 返回单包 RTT；TCP 返回到固定 IP 的 connect handshake；HTTP 返回从 HEAD 开始到最终响应头（若 fallback，则包含 HEAD 协商和 Range GET 首部）的时间。A-302 的 DNS 验证时间不进入协议 `value`，但进入 diagnostics DNS；新 TCP/HTTP connection 进入 diagnostics Dial，HTTP attempt 进入 diagnostics HTTP，已执行任务的完整解析/重试时间进入 diagnostics Ping。keep-alive 命中时 HTTP 数值自然不包含新连接成本。
+
+Apple M4/macOS、`GOMAXPROCS=1`、500,000 次稳态 benchmark：
+
+| Client path | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| 每次构造 pinned HTTP client/Transport | 180～218 | 1,000 | 7 |
+| bounded client cache hit | 70.1～73.5 | 0 | 0 |
+
+纯对象路径快约 2.5～3.1×并消除 1KB/7 次分配；真实网络收益更大，因为 cache hit 同时避免重复 TCP/TLS handshake。安全 key 保证这种复用不能跨越 DNS pin 或 TLS identity。
+
+正确性、安全和资源边界验证包括：
+
+- 同一 pinned target 两次真实请求只建立一条连接；不同 IP/Host 使用不同 client；64 路并发冷读只创建一个 client；
+- 容量 2 的 LRU、TTL 到期、显式清空和默认容量 64 边界；
+- HEAD 成功路径、405→Range GET、Range/identity headers、2xx/404/3xx 状态；
+- 慢无限正文在 250ms 内返回 TTFB 且服务端收到取消，64KB 响应头炸弹拒绝；
+- HTTP parent context 取消、统一 retry budget、真实 TCP pin，以及 50ms DNS 不进入 TCP latency 的语义对照；
+- 专项测试 20 次、专项 race 10 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。

@@ -118,7 +118,7 @@
   - 保留 HTTPS SNI/校验，重定向禁止或逐跳验证。
   - 测试：DNS rebinding、混合公私地址、redirect 私网、IPv6、端口/并发/频率限制、安全回归。
 
-- [ ] **A-303 Ping HTTP/TCP 受控连接复用与执行预算**
+- [x] **A-303 Ping HTTP/TCP 受控连接复用与执行预算**
   - 避免每 Ping 新建 Transport。
   - HEAD/Range 或有界 GET，不下载无界 body。
   - DNS 时间和连接时间统计语义明确。

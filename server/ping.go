@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -38,7 +37,11 @@ const (
 	maximumPingMinInterval        = time.Hour
 	pingResolutionTimeout         = 3 * time.Second
 	pingProbeTimeout              = 3 * time.Second
+	pingTaskTimeout               = 10 * time.Second
 	maximumPingResponseHeaderSize = 64 * 1024
+	maximumPingHTTPClients        = 64
+	pingHTTPClientTTL             = 10 * time.Minute
+	pingHTTPIdleTimeout           = 90 * time.Second
 )
 
 type pingProbeType uint8
@@ -81,6 +84,9 @@ var (
 
 	pingRateLimitMu    sync.Mutex
 	lastAcceptedPingAt time.Time
+
+	defaultPingDialer      = &net.Dialer{KeepAlive: 30 * time.Second}
+	defaultPingHTTPClients = newPingHTTPClientCache(maximumPingHTTPClients, pingHTTPClientTTL, time.Now)
 )
 
 type pingIPResolver interface {
@@ -98,6 +104,28 @@ type resolvedPingTarget struct {
 	definition pingTargetDefinition
 	addresses  []netip.Addr
 	pinned     netip.Addr
+}
+
+type pingHTTPClientKey struct {
+	scheme  string
+	host    string
+	port    uint16
+	address netip.Addr
+}
+
+type pingHTTPClientEntry struct {
+	client     *http.Client
+	expiresAt  time.Time
+	lastAccess uint64
+}
+
+type pingHTTPClientCache struct {
+	mu       sync.Mutex
+	entries  map[pingHTTPClientKey]pingHTTPClientEntry
+	capacity int
+	ttl      time.Duration
+	now      func() time.Time
+	sequence uint64
 }
 
 var restrictedPingPrefixes = []netip.Prefix{
@@ -387,7 +415,9 @@ func resolvePingTarget(
 		if resolver == nil {
 			return nil, errors.New("ping resolver is unavailable")
 		}
+		lookupStarted := time.Now()
 		resolved, err := resolver.LookupNetIP(ctx, "ip", definition.host)
+		diagnostics.ObserveDNS(lookupStarted, err)
 		if err != nil {
 			return nil, errors.New("failed to resolve ping target")
 		}
@@ -484,7 +514,12 @@ func allowPingNow() bool {
 	return true
 }
 
-func icmpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64, error) {
+func icmpPingResolvedContext(parent context.Context, target *resolvedPingTarget, timeout time.Duration) (int64, error) {
+	if parent == nil {
+		return -1, errors.New("ICMP ping requires a context")
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	pinger, err := ping.NewPinger(target.pinned.String())
 	if err != nil {
 		return -1, err
@@ -492,7 +527,7 @@ func icmpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64,
 	pinger.Count = 1
 	pinger.Timeout = timeout
 	pinger.SetPrivileged(true)
-	if err := pinger.Run(); err != nil {
+	if err := pinger.RunWithContext(ctx); err != nil {
 		return -1, err
 	}
 	stats := pinger.Statistics()
@@ -502,12 +537,20 @@ func icmpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64,
 	return stats.AvgRtt.Milliseconds(), nil
 }
 
-func tcpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func icmpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64, error) {
+	return icmpPingResolvedContext(context.Background(), target, timeout)
+}
+
+func tcpPingResolvedContext(parent context.Context, target *resolvedPingTarget, timeout time.Duration) (int64, error) {
+	if parent == nil {
+		return -1, errors.New("TCP ping requires a context")
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	endpoint := net.JoinHostPort(target.pinned.String(), strconv.Itoa(int(target.definition.port)))
 	started := time.Now()
-	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", endpoint)
+	connection, err := defaultPingDialer.DialContext(ctx, "tcp", endpoint)
+	diagnostics.ObserveDial(started, err)
 	if err != nil {
 		return -1, err
 	}
@@ -515,15 +558,113 @@ func tcpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64, 
 	return time.Since(started).Milliseconds(), nil
 }
 
-func newPinnedHTTPClient(target *resolvedPingTarget, timeout time.Duration) *http.Client {
+func tcpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64, error) {
+	return tcpPingResolvedContext(context.Background(), target, timeout)
+}
+
+func newPingHTTPClientCache(capacity int, ttl time.Duration, now func() time.Time) *pingHTTPClientCache {
+	if capacity <= 0 {
+		capacity = maximumPingHTTPClients
+	}
+	if ttl <= 0 {
+		ttl = pingHTTPClientTTL
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &pingHTTPClientCache{
+		entries:  make(map[pingHTTPClientKey]pingHTTPClientEntry, capacity),
+		capacity: capacity,
+		ttl:      ttl,
+		now:      now,
+	}
+}
+
+func pingHTTPKey(target *resolvedPingTarget) pingHTTPClientKey {
+	return pingHTTPClientKey{
+		scheme:  target.definition.url.Scheme,
+		host:    target.definition.host,
+		port:    target.definition.port,
+		address: target.pinned,
+	}
+}
+
+func (cache *pingHTTPClientCache) Get(target *resolvedPingTarget) *http.Client {
+	key := pingHTTPKey(target)
+	now := cache.now()
+	cache.mu.Lock()
+	cache.sequence++
+	if entry, exists := cache.entries[key]; exists && now.Before(entry.expiresAt) {
+		entry.lastAccess = cache.sequence
+		cache.entries[key] = entry
+		cache.mu.Unlock()
+		return entry.client
+	} else if exists {
+		delete(cache.entries, key)
+		entry.client.CloseIdleConnections()
+	}
+	client := buildPinnedHTTPClient(target, pingProbeTimeout)
+	if len(cache.entries) >= cache.capacity {
+		var oldestKey pingHTTPClientKey
+		var oldestAccess uint64
+		first := true
+		for candidateKey, entry := range cache.entries {
+			if first || entry.lastAccess < oldestAccess {
+				oldestKey = candidateKey
+				oldestAccess = entry.lastAccess
+				first = false
+			}
+		}
+		oldest := cache.entries[oldestKey]
+		delete(cache.entries, oldestKey)
+		oldest.client.CloseIdleConnections()
+	}
+	cache.sequence++
+	cache.entries[key] = pingHTTPClientEntry{
+		client:     client,
+		expiresAt:  now.Add(cache.ttl),
+		lastAccess: cache.sequence,
+	}
+	cache.mu.Unlock()
+	return client
+}
+
+func (cache *pingHTTPClientCache) Clear() {
+	cache.mu.Lock()
+	entries := cache.entries
+	cache.entries = make(map[pingHTTPClientKey]pingHTTPClientEntry, cache.capacity)
+	cache.mu.Unlock()
+	for _, entry := range entries {
+		entry.client.CloseIdleConnections()
+	}
+}
+
+func (cache *pingHTTPClientCache) Len() int {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return len(cache.entries)
+}
+
+func buildPinnedHTTPClient(target *resolvedPingTarget, timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = pingProbeTimeout
+	}
 	serverName := strings.TrimSuffix(target.definition.host, ".")
 	endpoint := net.JoinHostPort(target.pinned.String(), strconv.Itoa(int(target.definition.port)))
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, endpoint)
+			started := time.Now()
+			connection, err := defaultPingDialer.DialContext(ctx, network, endpoint)
+			diagnostics.ObserveDial(started, err)
+			return connection, err
 		},
 		ForceAttemptHTTP2:      true,
+		DisableCompression:     true,
+		MaxIdleConns:           4,
+		MaxIdleConnsPerHost:    2,
+		MaxConnsPerHost:        4,
+		IdleConnTimeout:        pingHTTPIdleTimeout,
 		TLSHandshakeTimeout:    timeout,
 		ResponseHeaderTimeout:  timeout,
 		ExpectContinueTimeout:  time.Second,
@@ -535,34 +676,64 @@ func newPinnedHTTPClient(target *resolvedPingTarget, timeout time.Duration) *htt
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
 }
 
-func httpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64, error) {
-	client := newPinnedHTTPClient(target, timeout)
-	defer client.CloseIdleConnections()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func newPinnedHTTPClient(target *resolvedPingTarget, timeout time.Duration) *http.Client {
+	return buildPinnedHTTPClient(target, timeout)
+}
+
+func httpPingResolvedContext(parent context.Context, target *resolvedPingTarget, timeout time.Duration) (latency int64, resultErr error) {
+	if parent == nil {
+		return -1, errors.New("HTTP ping requires a context")
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.definition.url.String(), http.NoBody)
-	if err != nil {
-		return -1, err
-	}
+	client := defaultPingHTTPClients.Get(target)
 	started := time.Now()
-	response, err := client.Do(request)
-	latency := time.Since(started).Milliseconds()
+	defer func() { diagnostics.ObserveHTTP(started, resultErr) }()
+	response, err := executePingHTTPRequest(ctx, client, target, http.MethodHead)
 	if err != nil {
 		return -1, err
 	}
-	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1))
+	if response.StatusCode == http.StatusMethodNotAllowed || response.StatusCode == http.StatusNotImplemented {
+		_ = response.Body.Close()
+		response, err = executePingHTTPRequest(ctx, client, target, http.MethodGet)
+		if err != nil {
+			return -1, err
+		}
+	}
+	latency = time.Since(started).Milliseconds()
+	_ = response.Body.Close()
 	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
 		return latency, nil
 	}
 	return latency, errors.New("HTTP ping returned a non-success status")
+}
+
+func executePingHTTPRequest(
+	ctx context.Context,
+	client *http.Client,
+	target *resolvedPingTarget,
+	method string,
+) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, method, target.definition.url.String(), http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept-Encoding", "identity")
+	request.Header.Set("User-Agent", "komari-agent")
+	if method == http.MethodGet {
+		request.Header.Set("Range", "bytes=0-0")
+	}
+	return client.Do(request)
+}
+
+func httpPingResolved(target *resolvedPingTarget, timeout time.Duration) (int64, error) {
+	return httpPingResolvedContext(context.Background(), target, timeout)
 }
 
 func prepareDirectPingTarget(pingType, target string) (*resolvedPingTarget, error) {
@@ -634,6 +805,41 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	return httpPingResolved(resolved, timeout)
 }
 
+type pingMeasureFunc func(context.Context) (int64, error)
+
+func measurePingWithRetries(
+	ctx context.Context,
+	probeType pingProbeType,
+	measure pingMeasureFunc,
+) (int64, error) {
+	const highLatencyThreshold int64 = 1000
+	const retryDropThresholdTCP int64 = 800
+	if ctx == nil {
+		return -1, errors.New("ping measurement requires a context")
+	}
+	latency, err := measure(ctx)
+	if err != nil || latency <= highLatencyThreshold {
+		return latency, err
+	}
+	firstLatency := latency
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return -1, err
+		}
+		second, retryErr := measure(ctx)
+		if retryErr != nil {
+			return -1, retryErr
+		}
+		if second <= highLatencyThreshold {
+			if probeType == pingProbeTCP && firstLatency-second > retryDropThresholdTCP {
+				return -1, errors.New("suspicious retransmission detected in TCP handshake")
+			}
+			return second, nil
+		}
+	}
+	return -1, errors.New("latency remains high after retries")
+}
+
 func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string) {
 	pingStarted := time.Now()
 	if taskID == 0 {
@@ -669,7 +875,9 @@ func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string
 		diagnostics.RecordPingRejected()
 		return
 	}
-	resolveContext, cancelResolve := context.WithTimeout(context.Background(), pingResolutionTimeout)
+	taskContext, cancelTask := context.WithTimeout(context.Background(), pingTaskTimeout)
+	defer cancelTask()
+	resolveContext, cancelResolve := context.WithTimeout(taskContext, pingResolutionTimeout)
 	resolved, err := resolvePingTarget(resolveContext, policy, definition, dnsresolver.GetCustomResolver())
 	cancelResolve()
 	if err != nil {
@@ -678,45 +886,20 @@ func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string
 		diagnostics.RecordPingRejected()
 		return
 	}
-	var latency int64
 	pingResult := -1
-	const highLatencyThreshold = 1000
-	const retryDropThresholdTCP = 800
-	measure := func() (int64, error) {
+	measure := func(ctx context.Context) (int64, error) {
 		switch resolved.definition.probeType {
 		case pingProbeICMP:
-			return icmpPingResolved(resolved, pingProbeTimeout)
+			return icmpPingResolvedContext(ctx, resolved, pingProbeTimeout)
 		case pingProbeTCP:
-			return tcpPingResolved(resolved, pingProbeTimeout)
+			return tcpPingResolvedContext(ctx, resolved, pingProbeTimeout)
 		case pingProbeHTTP:
-			return httpPingResolved(resolved, pingProbeTimeout)
+			return httpPingResolvedContext(ctx, resolved, pingProbeTimeout)
 		default:
 			return -1, errors.New("unsupported ping type")
 		}
 	}
-	if latency, err = measure(); err == nil {
-		firstLatency := latency
-		if latency > highLatencyThreshold {
-			for attempt := 0; attempt < 3; attempt++ {
-				second, retryErr := measure()
-				if retryErr != nil {
-					err = retryErr
-					break
-				}
-				if second <= highLatencyThreshold {
-					if resolved.definition.probeType == pingProbeTCP && firstLatency-second > retryDropThresholdTCP {
-						err = errors.New("suspicious retransmission detected in TCP handshake")
-						break
-					}
-					latency = second
-					break
-				}
-				if attempt == 2 {
-					err = errors.New("latency remains high after retries")
-				}
-			}
-		}
-	}
+	latency, err := measurePingWithRetries(taskContext, resolved.definition.probeType, measure)
 	if err != nil {
 		log.Printf("Ping task %d failed: %v", taskID, err)
 	} else {
