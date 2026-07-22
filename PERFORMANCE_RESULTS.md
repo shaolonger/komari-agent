@@ -240,3 +240,30 @@ Apple M4/macOS、100,000 次纯内存 benchmark（不含网络 I/O）：
 - shutdown 正常 drain、慢 writer 的 5 秒生产上限语义、连接失败后的可靠帧保留；
 - 8 路可靠生产者、10,000 次遥测/heartbeat 合并和单 consumer 并发压力；
 - `server` 专项测试 10 次、专项 race 3 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
+
+## A-203 长生命周期、按安全策略隔离的 HTTP Transport
+
+Agent 的 HTTP 路径不再为每次基础信息上报、任务结果上传、自动发现或更新检查新建 Transport。现在按权限建立并长期复用四个物理隔离的 client/connection pool：严格遥测、显式不安全遥测、严格控制结果、严格自动更新。每个 pool 拥有独立 Transport、TLS 配置和 idle connections；全局连接上限为 64、单 host idle 上限为 8、单 host 总连接上限为 16。
+
+`--ignore-unsafe-cert` 只会选择不安全遥测 pool，无法改变严格控制或严格更新的 TLS 配置。所有 pool 至少使用 TLS 1.2；控制结果始终校验证书。更新 client 还拒绝 HTTPS 到 HTTP 的 redirect downgrade。进程启动和更新检查均不再写入 `http.DefaultTransport`/`http.DefaultClient`，因此并发上报、控制和更新之间不存在全局安全策略串扰。
+
+自动更新原依赖无法把显式 client 安全地贯穿到 release asset 下载。新的受控 adapter 使用专属严格 client 读取 GitHub release metadata、目标平台二进制和 `.sha256`，并继续复用既有解包与回滚式原子替换能力。其安全边界包括：60 秒全流程预算、8MB metadata、128MB binary、64KB checksum 上限；只选 stable SemVer 和当前 OS/arch；缺少 checksum、hash 不匹配、HTTP URL/降级、非审计 Transport 全部 fail closed。可选 `GITHUB_TOKEN` 只发往 `api.github.com` metadata 请求，不会随资产重定向泄漏。
+
+每次请求使用自身 context deadline，client 本身不设置会污染连接复用的全局 timeout。任务结果重试现在及时 drain/close 上一次响应后再复用连接，错误和非 200 响应不会遗留不可复用的 body。
+
+Apple M4/macOS、1,000,000 次 client 获取 benchmark：
+
+| Client lookup | A-002 基线 | A-203 后 | 结果 |
+|---|---:|---:|---:|
+| verified/update | 2,292ns，968 B，4 allocs | 9.1～16.1ns，0 B，0 alloc | 约快 142～252×，删除每请求 Transport |
+| configured/telemetry | 1,500ns，968 B，4 allocs | 8.4～9.5ns，0 B，0 alloc | 约快 158～179×，删除每请求 Transport |
+
+真实本地 HTTP 集成测试连续 3 次完整请求只创建 1 条 TCP connection；请求 context 取消在 20ms 预算附近中止慢服务。正确性与安全验证还包括：
+
+- 四种 policy 的 client/Transport 指针完全隔离，同 policy 稳定复用；
+- 自签名 TLS 仅显式不安全遥测可连接，严格遥测、控制、更新全部拒绝；
+- `IgnoreUnsafeCert=true` 时自动更新仍收到专属 verified client，且进程全局 HTTP 对象保持原值；
+- release 最高稳定版本和平台选择、旧 release 缺 checksum 不干扰新有效 release；
+- checksum mismatch、短 checksum、最新 release 缺 checksum、超限响应、非法 repo slug 和 HTTP downgrade；
+- 64 路并发、每路 1,000 次 policy cache 读取的 race 回归；
+- 专项测试 5 次、专项 race 3 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。

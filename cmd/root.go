@@ -2,11 +2,9 @@ package cmd
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
@@ -119,7 +117,6 @@ var RootCmd = &cobra.Command{
 		// 忽略不安全的证书
 		if flags.IgnoreUnsafeCert {
 			log.Println("WARNING: --ignore-unsafe-cert disables remote control capabilities and automatic updates.")
-			http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		}
 		// 自动更新
 		if flags.AutoUpdateEnabled() {

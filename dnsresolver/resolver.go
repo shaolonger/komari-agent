@@ -3,6 +3,7 @@ package dnsresolver
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -37,14 +38,32 @@ var (
 
 	preferV4Once sync.Once
 	hasIPv4      bool
+	dnsConfigMu  sync.RWMutex
+
+	httpClientsMu sync.Mutex
+	httpClients   = make(map[httpClientPolicy]*http.Client, 4)
 )
+
+type httpClientPolicy uint8
+
+const (
+	httpTelemetryStrict httpClientPolicy = iota + 1
+	httpTelemetryInsecure
+	httpControlStrict
+	httpUpdateStrict
+)
+
+const defaultHTTPDialTimeout = 15 * time.Second
 
 // SetCustomDNSServer 设置自定义DNS服务器
 func SetCustomDNSServer(dnsServer string) {
 	if dnsServer == "" {
 		return
 	}
+	dnsConfigMu.Lock()
 	CustomDNSServer = normalizeDNSServer(dnsServer)
+	dnsConfigMu.Unlock()
+	resetHTTPClients()
 }
 
 // normalizeDNSServer 将输入的 DNS 服务器字符串规范化为 host:port 形式：
@@ -69,6 +88,8 @@ func normalizeDNSServer(s string) string {
 
 // getCurrentDNSServer 获取当前要使用的DNS服务器
 func getCurrentDNSServer() string {
+	dnsConfigMu.RLock()
+	defer dnsConfigMu.RUnlock()
 	if CustomDNSServer != "" {
 		return CustomDNSServer
 	}
@@ -169,7 +190,9 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 			diagnostics.ObserveDial(dialStarted, dialErr)
 			return nil, dialErr
 		},
-		MaxIdleConns:          10,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   8,
+		MaxConnsPerHost:       16,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -178,22 +201,80 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 	}
 }
 
-func newHTTPClient(timeout time.Duration, insecureSkipVerify bool) *http.Client {
-	return &http.Client{
-		Transport: buildTransport(timeout, &tls.Config{
-			InsecureSkipVerify: insecureSkipVerify,
-		}),
-		Timeout: timeout,
-	}
-}
-
+// GetHTTPClient is retained for compatibility. New code should use the
+// policy-specific accessors below; the timeout is enforced per request.
 func GetHTTPClient(timeout time.Duration) *http.Client {
-	return newHTTPClient(timeout, flags.IgnoreUnsafeCert)
+	_ = timeout
+	return GetTelemetryHTTPClient()
 }
 
-// GetVerifiedHTTPClient returns an HTTP client that always validates TLS certificates.
+// GetVerifiedHTTPClient is retained for compatibility and maps to the isolated
+// update client, which always validates TLS certificates.
 func GetVerifiedHTTPClient(timeout time.Duration) *http.Client {
-	return newHTTPClient(timeout, false)
+	_ = timeout
+	return GetUpdateHTTPClient()
+}
+
+// GetTelemetryHTTPClient returns the long-lived panel telemetry client. The
+// unsafe variant has its own Transport and is selected only by explicit flag.
+func GetTelemetryHTTPClient() *http.Client {
+	if flags.IgnoreUnsafeCert {
+		return getPolicyHTTPClient(httpTelemetryInsecure)
+	}
+	return getPolicyHTTPClient(httpTelemetryStrict)
+}
+
+// GetControlHTTPClient returns a physically isolated, certificate-verifying
+// client for privileged control results.
+func GetControlHTTPClient() *http.Client {
+	return getPolicyHTTPClient(httpControlStrict)
+}
+
+// GetUpdateHTTPClient returns a physically isolated, certificate-verifying
+// client for release metadata, binaries and checksum assets.
+func GetUpdateHTTPClient() *http.Client {
+	return getPolicyHTTPClient(httpUpdateStrict)
+}
+
+func getPolicyHTTPClient(policy httpClientPolicy) *http.Client {
+	httpClientsMu.Lock()
+	defer httpClientsMu.Unlock()
+	if client := httpClients[policy]; client != nil {
+		return client
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if policy == httpTelemetryInsecure {
+		tlsConfig.InsecureSkipVerify = true
+	}
+	client := &http.Client{
+		Transport: buildTransport(defaultHTTPDialTimeout, tlsConfig),
+	}
+	if policy == httpUpdateStrict {
+		client.CheckRedirect = requireSecureUpdateRedirect
+	}
+	httpClients[policy] = client
+	return client
+}
+
+func requireSecureUpdateRedirect(request *http.Request, via []*http.Request) error {
+	if request.URL.Scheme != "https" {
+		return errors.New("update redirect requires HTTPS")
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 update redirects")
+	}
+	return nil
+}
+
+func resetHTTPClients() {
+	httpClientsMu.Lock()
+	defer httpClientsMu.Unlock()
+	for _, client := range httpClients {
+		if transport, ok := client.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
+	}
+	httpClients = make(map[httpClientPolicy]*http.Client, 4)
 }
 
 // GetNetDialer 返回一个使用自定义DNS解析器的网络拨号器

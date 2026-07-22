@@ -88,7 +88,7 @@
   - 队列、重试、关闭都有明确上限和指标。
   - 测试：过载、顺序、合并、可靠消息、shutdown、race、benchmark。
 
-- [ ] **A-203 长生命周期、按安全策略隔离的 HTTP Transport**
+- [x] **A-203 长生命周期、按安全策略隔离的 HTTP Transport**
   - strict control、strict update、可选 insecure telemetry 物理隔离。
   - 合理连接池和 per-request deadline。
   - 删除每请求 Transport 和全局默认对象修改。

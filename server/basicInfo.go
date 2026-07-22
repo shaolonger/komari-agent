@@ -105,7 +105,9 @@ func tryUploadData(data map[string]interface{}) error {
 		return err
 	}
 
-	client := newControlPlaneHTTPClient(30 * time.Second)
+	client := newTelemetryHTTPClient()
+	req, cancel := requestWithTimeout(req, 30*time.Second)
+	defer cancel()
 
 	requestStarted := time.Now()
 	resp, err := client.Do(req)

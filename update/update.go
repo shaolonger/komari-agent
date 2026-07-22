@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -28,8 +29,8 @@ type selfUpdater interface {
 	UpdateSelf(current semver.Version, slug string) (*selfupdate.Release, error)
 }
 
-var newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
-	return selfupdate.NewUpdater(config)
+var newSelfUpdater = func(ctx context.Context, config selfupdate.Config, client *http.Client) (selfUpdater, error) {
+	return newVerifiedSelfUpdater(ctx, config, client)
 }
 
 var exitProcess = os.Exit
@@ -74,14 +75,10 @@ func CheckAndUpdate() error {
 		return failUpdate(updateStageVersionParse)
 	}
 
-	previousDefaultClient := http.DefaultClient
-	http.DefaultClient = dnsresolver.GetVerifiedHTTPClient(60 * time.Second)
-	defer func() {
-		http.DefaultClient = previousDefaultClient
-	}()
-
 	config := selfUpdateConfig()
-	updater, err := newSelfUpdater(config)
+	updateContext, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	updater, err := newSelfUpdater(updateContext, config, dnsresolver.GetUpdateHTTPClient())
 	if err != nil {
 		return failUpdate(updateStageUpdaterInit)
 	}

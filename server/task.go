@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -251,22 +252,38 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 		return
 	}
 
-	client := newControlPlaneHTTPClient(30 * time.Second)
-	resp, err := client.Do(req)
+	client := newControlPlaneHTTPClient()
 	maxRetry := flags.MaxRetries
-	for i := 0; i < maxRetry && (err != nil || resp.StatusCode != http.StatusOK); i++ {
-		log.Printf("Failed to upload task result, retrying %d/%d", i+1, maxRetry)
-		time.Sleep(2 * time.Second) // Wait before retrying
-		if resetErr := resetRequestBody(req); resetErr != nil {
-			log.Printf("Failed to reset task result request body: %v", resetErr)
-			break
-		}
-		resp, err = client.Do(req)
+	if maxRetry < 0 {
+		maxRetry = 0
 	}
-	if resp != nil {
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("Failed to upload task result: %s", resp.Status)
+	for attempt := 0; attempt <= maxRetry; attempt++ {
+		if attempt > 0 {
+			log.Printf("Failed to upload task result, retrying %d/%d", attempt, maxRetry)
+			time.Sleep(2 * time.Second)
+			if resetErr := resetRequestBody(req); resetErr != nil {
+				log.Printf("Failed to reset task result request body: %v", resetErr)
+				return
+			}
+		}
+		timedRequest, cancel := requestWithTimeout(req, 30*time.Second)
+		requestStarted := time.Now()
+		resp, err := client.Do(timedRequest)
+		diagnostics.ObserveHTTP(requestStarted, err)
+		if resp != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+			_ = resp.Body.Close()
+		}
+		cancel()
+		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
+			return
+		}
+		if attempt == maxRetry {
+			if resp != nil {
+				log.Printf("Failed to upload task result: %s", resp.Status)
+			} else {
+				log.Printf("Failed to upload task result after %d attempt(s)", attempt+1)
+			}
 		}
 	}
 }

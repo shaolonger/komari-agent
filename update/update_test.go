@@ -2,6 +2,7 @@ package update
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -32,9 +33,8 @@ func useUpdateHooks(t *testing.T, updater selfUpdater, updateErr error, exitCode
 	previousUpdater := newSelfUpdater
 	previousExit := exitProcess
 	previousVersion := CurrentVersion
-	previousClient := http.DefaultClient
 
-	newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
+	newSelfUpdater = func(context.Context, selfupdate.Config, *http.Client) (selfUpdater, error) {
 		if updateErr != nil {
 			return nil, updateErr
 		}
@@ -49,7 +49,6 @@ func useUpdateHooks(t *testing.T, updater selfUpdater, updateErr error, exitCode
 		newSelfUpdater = previousUpdater
 		exitProcess = previousExit
 		CurrentVersion = previousVersion
-		http.DefaultClient = previousClient
 	})
 }
 
@@ -204,7 +203,7 @@ func TestCheckAndUpdateDoesNotExitOnUpdaterError(t *testing.T) {
 	logs := captureUpdateLogs(t)
 
 	updateFailure := errors.New("Failed validating asset content for https://updates.example/download?token=secret")
-	newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
+	newSelfUpdater = func(context.Context, selfupdate.Config, *http.Client) (selfUpdater, error) {
 		return stubSelfUpdater{err: updateFailure}, nil
 	}
 
@@ -238,20 +237,26 @@ func TestCheckAndUpdateUsesVerifiedHTTPClientWhenUnsafeCertsEnabled(t *testing.T
 	useUpdateHooks(t, stubSelfUpdater{}, nil, &exitCode)
 
 	previousIgnoreUnsafeCert := flags_pkg.GlobalConfig.IgnoreUnsafeCert
+	previousDefaultClient := http.DefaultClient
+	previousDefaultTransport := http.DefaultTransport
 	flags_pkg.GlobalConfig.IgnoreUnsafeCert = true
 	t.Cleanup(func() {
 		flags_pkg.GlobalConfig.IgnoreUnsafeCert = previousIgnoreUnsafeCert
 	})
 
-	previousDefaultClient := http.DefaultClient
 	observedSkipVerify := true
+	var observedClient *http.Client
 
-	newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
+	newSelfUpdater = func(ctx context.Context, _ selfupdate.Config, client *http.Client) (selfUpdater, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("auto-update context has no deadline")
+		}
+		observedClient = client
 		return stubSelfUpdater{
 			update: func(current semver.Version, slug string) (*selfupdate.Release, error) {
-				transport, ok := http.DefaultClient.Transport.(*http.Transport)
+				transport, ok := client.Transport.(*http.Transport)
 				if !ok {
-					t.Fatalf("http.DefaultClient.Transport = %T, want *http.Transport", http.DefaultClient.Transport)
+					t.Fatalf("update client transport = %T, want *http.Transport", client.Transport)
 				}
 				if transport.TLSClientConfig == nil {
 					t.Fatal("http.DefaultClient.Transport.TLSClientConfig = nil, want non-nil")
@@ -266,10 +271,13 @@ func TestCheckAndUpdateUsesVerifiedHTTPClientWhenUnsafeCertsEnabled(t *testing.T
 		t.Fatalf("CheckAndUpdate() error = %v", err)
 	}
 	if observedSkipVerify {
-		t.Fatal("http.DefaultClient used by auto-update had InsecureSkipVerify=true, want false")
+		t.Fatal("dedicated auto-update client had InsecureSkipVerify=true, want false")
 	}
-	if http.DefaultClient != previousDefaultClient {
-		t.Fatal("http.DefaultClient was not restored after auto-update check")
+	if observedClient == nil || observedClient == http.DefaultClient {
+		t.Fatal("auto-update did not receive a dedicated HTTP client")
+	}
+	if http.DefaultClient != previousDefaultClient || http.DefaultTransport != previousDefaultTransport {
+		t.Fatal("auto-update modified a process-global HTTP object")
 	}
 	if exitCode != 0 {
 		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
