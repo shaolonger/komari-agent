@@ -419,6 +419,10 @@ func GetTotalTrafficBetween(start, end uint64) (map[string]TrafficData, error) {
 	mu.RLock()
 	defer mu.RUnlock()
 	ensureInitLocked()
+	return sumTrafficBetween(store.Interfaces, staticCache, start, end), nil
+}
+
+func sumTrafficBetween(persisted, pending map[string][]TrafficData, start, end uint64) map[string]TrafficData {
 	res := map[string]TrafficData{}
 	inRange := func(ts uint64) bool { return (start == 0 || ts >= start) && (end == 0 || ts <= end) }
 	add := func(name string, tx, rx uint64) {
@@ -427,7 +431,7 @@ func GetTotalTrafficBetween(start, end uint64) (map[string]TrafficData, error) {
 		cur.Rx += rx
 		res[name] = cur
 	}
-	for name, arr := range store.Interfaces {
+	for name, arr := range persisted {
 		var tx, rx uint64
 		for _, td := range arr {
 			if inRange(td.Timestamp) {
@@ -439,7 +443,7 @@ func GetTotalTrafficBetween(start, end uint64) (map[string]TrafficData, error) {
 			add(name, tx, rx)
 		}
 	}
-	for name, arr := range staticCache {
+	for name, arr := range pending {
 		var tx, rx uint64
 		for _, td := range arr {
 			if inRange(td.Timestamp) {
@@ -451,7 +455,7 @@ func GetTotalTrafficBetween(start, end uint64) (map[string]TrafficData, error) {
 			add(name, tx, rx)
 		}
 	}
-	return res, nil
+	return res
 }
 
 // SetNewConfig 设置新的配置，config中的值如果为0则表示不修改对应的配置项

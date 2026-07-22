@@ -3,6 +3,7 @@
 状态：执行中  
 基线：`2ac1fc8`（`v1.2.8` 后续终端修复）  
 配套清单：[`PERFORMANCE_REFACTOR_TODOLIST.md`](PERFORMANCE_REFACTOR_TODOLIST.md)
+性能基线：[`PERFORMANCE_BASELINE.md`](PERFORMANCE_BASELINE.md)
 
 ## 1. 文档目标
 
@@ -284,4 +285,3 @@ Runtime 为每类指标配置：
 - 协议 v2 失败自动回到安全的 JSON v1；
 - Release 使用新 SemVer，不覆盖现有 tag；
 - 创建 Release 后等待构建、签名、容器和 release notes workflow 完成并核验资产。
-

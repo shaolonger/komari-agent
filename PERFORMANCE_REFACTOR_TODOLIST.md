@@ -26,10 +26,11 @@
   - CI 增加 `go test -race ./...` 的受支持平台门禁。
   - 测试：重复运行 race suite，不得再由测试基础设施产生竞争。
 
-- [ ] **A-002 建立采样、编码、连接和本地流量性能基线**
+- [x] **A-002 建立采样、编码、连接和本地流量性能基线**
   - benchmark CPU、网络、内存、磁盘、socket、process、GPU adapter、报告编码和 netstatic。
   - 增加可重复 fake `/proc`/系统源和 benchmark fixture。
   - 输出 allocations/op、bytes/op、duration 和采样 syscall/command 次数。
+  - 基线结果：[`PERFORMANCE_BASELINE.md`](PERFORMANCE_BASELINE.md)。
 
 - [ ] **A-003 增加低开销本地性能计数与诊断模式**
   - sampler、report、queue、WS、DNS/HTTP、Ping、netstatic 指标。

@@ -2,8 +2,10 @@ package monitoring
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,16 +69,33 @@ func readCPUNameFromProc() (string, error) {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
+	return readCPUName(file)
+}
+
+func readCPUName(reader io.Reader) (string, error) {
+	scanner := bufio.NewScanner(reader)
+	processorName := ""
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "Model\t") || strings.HasPrefix(line, "Hardware\t") || strings.HasPrefix(line, "Processor\t") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1]), nil
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		value := strings.TrimSpace(parts[1])
+		switch key {
+		case "model", "model name", "hardware":
+			if value != "" {
+				return value, nil
+			}
+		case "processor":
+			if value != "" {
+				if _, err := strconv.ParseUint(value, 10, 64); err != nil && processorName == "" {
+					processorName = value
+				}
 			}
 		}
 	}
 
-	return "", scanner.Err()
+	return processorName, scanner.Err()
 }

@@ -3,6 +3,7 @@ package monitoring
 import (
 	"bufio"
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -42,8 +43,12 @@ func ReadProcMeminfo() (*ProcMemInfo, error) {
 	}
 	defer file.Close()
 
+	return readProcMeminfo(file)
+}
+
+func readProcMeminfo(reader io.Reader) (*ProcMemInfo, error) {
 	info := &ProcMemInfo{}
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Fields(line)
