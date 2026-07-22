@@ -20,12 +20,14 @@ func useHTTPClientTestState(t *testing.T) {
 	previousDNS := CustomDNSServer
 	CustomDNSServer = ""
 	dnsConfigMu.Unlock()
+	resolvedHostCache.Clear()
 	resetHTTPClients()
 	t.Cleanup(func() {
 		flags.IgnoreUnsafeCert = previousUnsafe
 		dnsConfigMu.Lock()
 		CustomDNSServer = previousDNS
 		dnsConfigMu.Unlock()
+		resolvedHostCache.Clear()
 		resetHTTPClients()
 	})
 }

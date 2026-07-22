@@ -94,7 +94,7 @@
   - 删除每请求 Transport 和全局默认对象修改。
   - 测试：连接复用、证书、IgnoreUnsafeCert capability、安全更新、race。
 
-- [ ] **A-204 自定义 DNS、Happy Eyeballs 和有界缓存**
+- [x] **A-204 自定义 DNS、Happy Eyeballs 和有界缓存**
   - IPv4/IPv6 并发竞速，自定义 resolver 保持支持。
   - lookup 和 dial 服从总 context 预算。
   - 测试：v4/v6 单栈、首地址失败、超时、取消、DNS 变更、benchmark。

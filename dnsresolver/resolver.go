@@ -8,13 +8,11 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
-	"github.com/komari-monitor/komari-agent/diagnostics"
 )
 
 var flags = pkg_flags.GlobalConfig
@@ -63,6 +61,7 @@ func SetCustomDNSServer(dnsServer string) {
 	dnsConfigMu.Lock()
 	CustomDNSServer = normalizeDNSServer(dnsServer)
 	dnsConfigMu.Unlock()
+	resolvedHostCache.Clear()
 	resetHTTPClients()
 }
 
@@ -145,50 +144,7 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			lookupStarted := time.Now()
-			ips, err := customResolver.LookupHost(ctx, host)
-			diagnostics.ObserveDNS(lookupStarted, err)
-			if err != nil {
-				return nil, err
-			}
-			// 根据本机是否具备 IPv4 动态排序
-			preferIPv4 := preferIPv4First()
-			sort.SliceStable(ips, func(i, j int) bool {
-				ip1 := net.ParseIP(ips[i])
-				ip2 := net.ParseIP(ips[j])
-				if ip1 == nil || ip2 == nil {
-					return false
-				}
-				if preferIPv4 {
-					return ip1.To4() != nil && ip2.To4() == nil
-				}
-				// IPv6 优先
-				return ip1.To4() == nil && ip2.To4() != nil
-			})
-			dialStarted := time.Now()
-			var dialErr error
-			for _, ip := range ips {
-				dialer := &net.Dialer{
-					Timeout:   timeout,
-					KeepAlive: 30 * time.Second,
-					DualStack: true,
-				}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
-				if err == nil {
-					diagnostics.ObserveDial(dialStarted, nil)
-					return conn, nil
-				}
-				dialErr = err
-			}
-			if dialErr == nil {
-				dialErr = fmt.Errorf("failed to dial to any of the resolved IPs")
-			}
-			diagnostics.ObserveDial(dialStarted, dialErr)
-			return nil, dialErr
+			return dialWithResolver(ctx, network, addr, timeout, customResolver)
 		},
 		MaxIdleConns:          64,
 		MaxIdleConnsPerHost:   8,
@@ -292,8 +248,9 @@ func GetNetDialer(timeout time.Duration) *net.Dialer {
 
 // GetDialContext 返回一个自定义 DialContext：
 // - 使用自定义解析器解析主机名
-// - 优先尝试 IPv4，再尝试 IPv6
-// - 逐个 IP 进行连接尝试，直到成功或全部失败
+// - 使用有界 DNS 缓存并在配置变化时失效
+// - 以 Happy Eyeballs 方式竞速 IPv4/IPv6
+// - 解析与所有连接尝试共享同一个总超时预算
 func GetDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -302,58 +259,7 @@ func GetDialContext(timeout time.Duration) func(ctx context.Context, network, ad
 	resolver := GetCustomResolver()
 
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
-
-		// 为解析设置一个带超时的子 context，避免整体拨号过快超时
-		lookupCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-
-		lookupStarted := time.Now()
-		ips, err := resolver.LookupHost(lookupCtx, host)
-		diagnostics.ObserveDNS(lookupStarted, err)
-		if err != nil {
-			return nil, err
-		}
-
-		// 根据本机是否具备 IPv4 动态排序
-		preferIPv4 := preferIPv4First()
-		sort.SliceStable(ips, func(i, j int) bool {
-			ip1 := net.ParseIP(ips[i])
-			ip2 := net.ParseIP(ips[j])
-			if ip1 == nil || ip2 == nil {
-				return false
-			}
-			if preferIPv4 {
-				return ip1.To4() != nil && ip2.To4() == nil
-			}
-			// IPv6 优先
-			return ip1.To4() == nil && ip2.To4() != nil
-		})
-
-		// 逐个 IP 尝试连接
-		dialStarted := time.Now()
-		var dialErr error
-		for _, ip := range ips {
-			d := &net.Dialer{
-				Timeout:   timeout,
-				KeepAlive: 30 * time.Second,
-				DualStack: true,
-			}
-			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
-			if err == nil {
-				diagnostics.ObserveDial(dialStarted, nil)
-				return c, nil
-			}
-			dialErr = err
-		}
-		if dialErr == nil {
-			dialErr = fmt.Errorf("failed to dial to any of the resolved IPs")
-		}
-		diagnostics.ObserveDial(dialStarted, dialErr)
-		return nil, dialErr
+		return dialWithResolver(ctx, network, addr, timeout, resolver)
 	}
 }
 

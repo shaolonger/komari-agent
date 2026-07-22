@@ -267,3 +267,31 @@ Apple M4/macOS、1,000,000 次 client 获取 benchmark：
 - checksum mismatch、短 checksum、最新 release 缺 checksum、超限响应、非法 repo slug 和 HTTP downgrade；
 - 64 路并发、每路 1,000 次 policy cache 读取的 race 回归；
 - 专项测试 5 次、专项 race 3 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
+
+## A-204 自定义 DNS、Happy Eyeballs 和有界缓存
+
+HTTP 与 WebSocket 的自定义拨号路径现在共用同一个解析/连接算法。DNS 正结果缓存固定为 256 个 hostname、TTL 60 秒；同一 hostname 的并发 cache miss 合并为一次查询，错误不缓存，避免瞬时 DNS 故障形成负缓存。LRU 淘汰保证长期运行内存上限，缓存返回副本保证调用方无法修改共享状态。
+
+自定义 DNS 配置变更会同时清空地址缓存、隔离正在进行的旧 generation lookup，并关闭/重建 A-203 的所有 HTTP Transport。旧 lookup 即使稍后返回也不能覆盖新 generation 的结果。系统或权威 DNS 地址变化最迟在 60 秒 TTL 后重新查询。
+
+连接算法将 DNS 返回值解析为 `netip.Addr`，去除 IPv4-mapped 重复项和非法地址；每份 DNS 结果最多缓存 32 个不同地址，每次拨号最多使用交错后的 16 个地址。IPv4/IPv6 按本机可用性选择首选族并交错，首选地址立即发起，另一地址族默认在 250ms 后竞速；若首个地址立即失败，则不等待 250ms，马上推进下一地址。成功后取消并回收其他 attempt，全部失败保留聚合错误。
+
+DNS lookup 和全部连接 attempt 共享同一个 context/总 timeout。旧实现可能对每个地址各使用完整 timeout 并串行累加；现在无论 DNS 返回多少地址，调用方预算到期都会取消所有并发拨号。`tcp4`/`tcp6` 等显式单栈 network 会严格过滤另一地址族，自定义 resolver 与系统 resolver 均保留支持。
+
+Apple M4/macOS、10,000 次纯解析 benchmark：
+
+| Path | ns/op | B/op | allocs/op | 结果 |
+|---|---:|---:|---:|---|
+| A-204 前系统 `localhost` lookup | 83,631～86,581 | 304 | 10 | 每次进入系统 resolver |
+| A-204 DNS cache hit | 57.9～108.9 | 48 | 1 | 约快 768～1,496× |
+| 8 地址 parse + 去重 + 双栈交错 | 352.6～384.1 | 672 | 6 | 只在 cache miss/新结果时执行 |
+
+正确性、资源边界和并发验证包括：
+
+- cache hit 副本所有权、TTL 到期、容量 2 的确定性 LRU 淘汰；
+- 64 路同域并发 miss 只调用一次 loader，等待者可独立取消；
+- Clear 与旧 in-flight lookup 竞态下新结果不被旧结果覆盖；
+- DNS 配置变更同时失效地址与 Transport cache；
+- IPv6 首选悬挂时 IPv4 在 fallback delay 后成功，首地址立即失败时零额外等待；
+- 全部连接失败、总 deadline、取消、单栈过滤、非法/重复/超量 DNS 响应；
+- 专项测试 25 次、专项 race 10 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
