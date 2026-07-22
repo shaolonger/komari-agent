@@ -13,6 +13,7 @@ import (
 	"time"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/diagnostics"
 )
 
 var flags = pkg_flags.GlobalConfig
@@ -127,7 +128,9 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 			if err != nil {
 				return nil, err
 			}
+			lookupStarted := time.Now()
 			ips, err := customResolver.LookupHost(ctx, host)
+			diagnostics.ObserveDNS(lookupStarted, err)
 			if err != nil {
 				return nil, err
 			}
@@ -145,6 +148,8 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 				// IPv6 优先
 				return ip1.To4() == nil && ip2.To4() != nil
 			})
+			dialStarted := time.Now()
+			var dialErr error
 			for _, ip := range ips {
 				dialer := &net.Dialer{
 					Timeout:   timeout,
@@ -153,10 +158,16 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 				}
 				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
 				if err == nil {
+					diagnostics.ObserveDial(dialStarted, nil)
 					return conn, nil
 				}
+				dialErr = err
 			}
-			return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+			if dialErr == nil {
+				dialErr = fmt.Errorf("failed to dial to any of the resolved IPs")
+			}
+			diagnostics.ObserveDial(dialStarted, dialErr)
+			return nil, dialErr
 		},
 		MaxIdleConns:          10,
 		IdleConnTimeout:       90 * time.Second,
@@ -219,7 +230,9 @@ func GetDialContext(timeout time.Duration) func(ctx context.Context, network, ad
 		lookupCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
+		lookupStarted := time.Now()
 		ips, err := resolver.LookupHost(lookupCtx, host)
+		diagnostics.ObserveDNS(lookupStarted, err)
 		if err != nil {
 			return nil, err
 		}
@@ -240,6 +253,8 @@ func GetDialContext(timeout time.Duration) func(ctx context.Context, network, ad
 		})
 
 		// 逐个 IP 尝试连接
+		dialStarted := time.Now()
+		var dialErr error
 		for _, ip := range ips {
 			d := &net.Dialer{
 				Timeout:   timeout,
@@ -248,10 +263,16 @@ func GetDialContext(timeout time.Duration) func(ctx context.Context, network, ad
 			}
 			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
 			if err == nil {
+				diagnostics.ObserveDial(dialStarted, nil)
 				return c, nil
 			}
+			dialErr = err
 		}
-		return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+		if dialErr == nil {
+			dialErr = fmt.Errorf("failed to dial to any of the resolved IPs")
+		}
+		diagnostics.ObserveDial(dialStarted, dialErr)
+		return nil, dialErr
 	}
 }
 

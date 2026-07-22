@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/diagnostics"
 	ping "github.com/prometheus-community/pro-bing"
 )
 
@@ -581,30 +582,36 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 }
 
 func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string) {
+	pingStarted := time.Now()
 	if taskID == 0 {
 		log.Printf("Invalid task ID: %d", taskID)
+		diagnostics.RecordPingRejected()
 		return
 	}
 	if !flags.PingEnabled() {
 		log.Printf("Ping task %d rejected: ping capability is disabled", taskID)
 		writePingResult(conn, taskID, pingType, -1)
+		diagnostics.RecordPingRejected()
 		return
 	}
 	if err := pingTargetAllowed(pingType, pingTarget); err != nil {
 		log.Printf("Ping task %d rejected: %v", taskID, err)
 		writePingResult(conn, taskID, pingType, -1)
+		diagnostics.RecordPingRejected()
 		return
 	}
 	releasePingSlot, ok := tryAcquirePingExecutionSlot()
 	if !ok {
 		log.Printf("Ping task %d rejected: concurrent ping limit reached", taskID)
 		writePingResult(conn, taskID, pingType, -1)
+		diagnostics.RecordPingRejected()
 		return
 	}
 	defer releasePingSlot()
 	if !allowPingNow() {
 		log.Printf("Ping task %d rejected: ping rate limit reached", taskID)
 		writePingResult(conn, taskID, pingType, -1)
+		diagnostics.RecordPingRejected()
 		return
 	}
 	var err error = nil
@@ -660,6 +667,7 @@ func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string
 	} else {
 		pingResult = int(latency)
 	}
+	diagnostics.ObservePing(pingStarted, err)
 	writePingResult(conn, taskID, pingType, pingResult)
 }
 

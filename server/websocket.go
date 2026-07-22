@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari-agent/diagnostics"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
 	"github.com/komari-monitor/komari-agent/terminal"
@@ -132,6 +133,7 @@ func EstablishWebSocketConnection() {
 					conn, err = connectWebSocket(websocketEndpoint)
 					if err == nil {
 						log.Println("WebSocket connected")
+						diagnostics.RecordWebSocketConnected()
 						go handleWebSocketMessages(conn, make(chan struct{}))
 						break
 					} else {
@@ -153,8 +155,10 @@ func EstablishWebSocketConnection() {
 				log.Println("Failed to send WebSocket message:", err)
 				conn.Close()
 				conn = nil // Mark connection as dead
+				diagnostics.RecordWebSocketDisconnected()
 				continue
 			}
+			diagnostics.RecordWebSocketMessageSent()
 		case <-heartbeatTicker.C:
 			if conn != nil {
 				err := conn.WriteMessage(websocket.PingMessage, nil)
@@ -162,6 +166,7 @@ func EstablishWebSocketConnection() {
 					log.Println("Failed to send heartbeat:", err)
 					conn.Close()
 					conn = nil // Mark connection as dead
+					diagnostics.RecordWebSocketDisconnected()
 				}
 			}
 		}
@@ -192,6 +197,7 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 			log.Println("WebSocket read error:", err)
 			return
 		}
+		diagnostics.RecordWebSocketMessageRead()
 		var message controlPlaneMessage
 		err = json.Unmarshal(message_raw, &message)
 		if err != nil {

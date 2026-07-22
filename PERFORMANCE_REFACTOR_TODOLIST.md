@@ -32,7 +32,7 @@
   - 输出 allocations/op、bytes/op、duration 和采样 syscall/command 次数。
   - 基线结果：[`PERFORMANCE_BASELINE.md`](PERFORMANCE_BASELINE.md)。
 
-- [ ] **A-003 增加低开销本地性能计数与诊断模式**
+- [x] **A-003 增加低开销本地性能计数与诊断模式**
   - sampler、report、queue、WS、DNS/HTTP、Ping、netstatic 指标。
   - 默认关闭详细诊断，日志和 profile 脱敏。
   - 测试：并发、开关、敏感字段和性能开销。

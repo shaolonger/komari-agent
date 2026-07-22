@@ -4,18 +4,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/diagnostics"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 )
 
 var flags = pkg_flags.GlobalConfig
 
 func GenerateReport() []byte {
+	reportStarted := time.Now()
 	message := ""
 	data := map[string]interface{}{}
 
+	sampleStarted := time.Now()
 	cpu := monitoring.Cpu()
+	diagnostics.ObserveSampler(diagnostics.SamplerCPU, sampleStarted, nil)
 	cpuUsage := cpu.CPUUsage
 	if cpuUsage <= 0.001 {
 		cpuUsage = 0.001
@@ -24,31 +29,41 @@ func GenerateReport() []byte {
 		"usage": cpuUsage,
 	}
 
+	sampleStarted = time.Now()
 	ram := monitoring.Ram()
+	diagnostics.ObserveSampler(diagnostics.SamplerRAM, sampleStarted, nil)
 	data["ram"] = map[string]interface{}{
 		"total": ram.Total,
 		"used":  ram.Used,
 	}
 
+	sampleStarted = time.Now()
 	swap := monitoring.Swap()
+	diagnostics.ObserveSampler(diagnostics.SamplerSwap, sampleStarted, nil)
 	data["swap"] = map[string]interface{}{
 		"total": swap.Total,
 		"used":  swap.Used,
 	}
+	sampleStarted = time.Now()
 	load := monitoring.Load()
+	diagnostics.ObserveSampler(diagnostics.SamplerLoad, sampleStarted, nil)
 	data["load"] = map[string]interface{}{
 		"load1":  load.Load1,
 		"load5":  load.Load5,
 		"load15": load.Load15,
 	}
 
+	sampleStarted = time.Now()
 	disk := monitoring.Disk()
+	diagnostics.ObserveSampler(diagnostics.SamplerDisk, sampleStarted, nil)
 	data["disk"] = map[string]interface{}{
 		"total": disk.Total,
 		"used":  disk.Used,
 	}
 
+	sampleStarted = time.Now()
 	totalUp, totalDown, networkUp, networkDown, err := monitoring.NetworkSpeed()
+	diagnostics.ObserveSampler(diagnostics.SamplerNetwork, sampleStarted, err)
 	if err != nil {
 		message += fmt.Sprintf("failed to get network speed: %v\n", err)
 	}
@@ -59,7 +74,9 @@ func GenerateReport() []byte {
 		"totalDown": totalDown,
 	}
 
+	sampleStarted = time.Now()
 	tcpCount, udpCount, err := monitoring.ConnectionsCount()
+	diagnostics.ObserveSampler(diagnostics.SamplerConnections, sampleStarted, err)
 	if err != nil {
 		message += fmt.Sprintf("failed to get connections: %v\n", err)
 	}
@@ -68,19 +85,25 @@ func GenerateReport() []byte {
 		"udp": udpCount,
 	}
 
+	sampleStarted = time.Now()
 	uptime, err := monitoring.Uptime()
+	diagnostics.ObserveSampler(diagnostics.SamplerUptime, sampleStarted, err)
 	if err != nil {
 		message += fmt.Sprintf("failed to get uptime: %v\n", err)
 	}
 	data["uptime"] = uptime
 
+	sampleStarted = time.Now()
 	processcount := monitoring.ProcessCount()
+	diagnostics.ObserveSampler(diagnostics.SamplerProcess, sampleStarted, nil)
 	data["process"] = processcount
 
 	// GPU监控 - 根据标志决定详细程度
 	if flags.EnableGPU {
 		// 详细GPU监控模式
+		sampleStarted = time.Now()
 		gpuInfo, err := monitoring.GetDetailedGPUInfo()
+		diagnostics.ObserveSampler(diagnostics.SamplerGPU, sampleStarted, err)
 		if err != nil {
 			message += fmt.Sprintf("failed to get detailed GPU info: %v\n", err)
 			// 降级到基础GPU信息
@@ -123,5 +146,6 @@ func GenerateReport() []byte {
 	if err != nil {
 		log.Println("Failed to marshal data:", err)
 	}
+	diagnostics.ObserveReport(reportStarted, len(s), err)
 	return s
 }

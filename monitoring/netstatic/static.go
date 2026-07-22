@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/diagnostics"
 	gnet "github.com/shirou/gopsutil/v4/net"
 )
 
@@ -139,7 +140,11 @@ func loadFromFileLocked() error {
 	return nil
 }
 
-func saveToFileLocked() error {
+func saveToFileLocked() (resultErr error) {
+	started := time.Now()
+	defer func() {
+		diagnostics.ObserveNetstaticSave(started, resultErr)
+	}()
 	// 确保目录存在
 	if err := os.MkdirAll(filepath.Dir(SaveFilePath), 0o755); err != nil {
 		return err
@@ -416,10 +421,13 @@ func GetTotalTraffic() (map[string]TrafficData, error) {
 
 // GetTotalTrafficBetween 获取指定时间段内的总流量统计数据，start和end为unix时间戳
 func GetTotalTrafficBetween(start, end uint64) (map[string]TrafficData, error) {
+	started := time.Now()
 	mu.RLock()
 	defer mu.RUnlock()
 	ensureInitLocked()
-	return sumTrafficBetween(store.Interfaces, staticCache, start, end), nil
+	result := sumTrafficBetween(store.Interfaces, staticCache, start, end)
+	diagnostics.ObserveNetstaticQuery(started, nil)
+	return result, nil
 }
 
 func sumTrafficBetween(persisted, pending map[string][]TrafficData, start, end uint64) map[string]TrafficData {

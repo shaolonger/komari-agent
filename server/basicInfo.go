@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/diagnostics"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 	"github.com/komari-monitor/komari-agent/update"
 
@@ -108,7 +109,9 @@ func tryUploadData(data map[string]interface{}) error {
 
 	client := newControlPlaneHTTPClient(30 * time.Second)
 
+	requestStarted := time.Now()
 	resp, err := client.Do(req)
+	diagnostics.ObserveHTTP(requestStarted, err)
 	if err != nil {
 		return err
 	}
