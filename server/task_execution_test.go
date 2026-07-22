@@ -6,6 +6,7 @@ import (
 	"log"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,6 +16,27 @@ type capturedTaskResult struct {
 	result     string
 	exitCode   int
 	finishedAt time.Time
+}
+
+// synchronizedBuffer is an io.Writer whose contents can be inspected while
+// background task goroutines are still emitting log records. bytes.Buffer is
+// not safe for concurrent reads and writes, which made the race test exercise
+// the test fixture instead of the production task code.
+type synchronizedBuffer struct {
+	mu  sync.RWMutex
+	buf bytes.Buffer
+}
+
+func (buffer *synchronizedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buf.Write(data)
+}
+
+func (buffer *synchronizedBuffer) String() string {
+	buffer.mu.RLock()
+	defer buffer.mu.RUnlock()
+	return buffer.buf.String()
 }
 
 func TestNewTaskReturnsCommandOutput(t *testing.T) {
@@ -269,10 +291,10 @@ func setTaskConcurrencyLimit(t *testing.T, limit int) {
 	})
 }
 
-func captureTaskLogs(t *testing.T) (*bytes.Buffer, func()) {
+func captureTaskLogs(t *testing.T) (*synchronizedBuffer, func()) {
 	t.Helper()
 
-	logBuffer := &bytes.Buffer{}
+	logBuffer := &synchronizedBuffer{}
 	originalWriter := log.Writer()
 	originalFlags := log.Flags()
 	log.SetOutput(logBuffer)
@@ -316,7 +338,7 @@ func waitForTaskResult(t *testing.T, results <-chan capturedTaskResult) captured
 	}
 }
 
-func waitForLogSubstring(t *testing.T, logBuffer *bytes.Buffer, needle string) {
+func waitForLogSubstring(t *testing.T, logBuffer *synchronizedBuffer, needle string) {
 	t.Helper()
 
 	deadline := time.Now().Add(3 * time.Second)
