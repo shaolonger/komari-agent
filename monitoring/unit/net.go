@@ -28,19 +28,6 @@ type networkSampler struct {
 
 var defaultNetworkSampler = newNetworkSampler(net.IOCounters, time.Now)
 
-func ConnectionsCount() (tcpCount, udpCount int, err error) {
-	tcps, err := net.Connections("tcp")
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get TCP connections: %w", err)
-	}
-	udps, err := net.Connections("udp")
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get UDP connections: %w", err)
-	}
-
-	return len(tcps), len(udps), nil
-}
-
 var (
 	// 预定义常见的回环和虚拟接口名称
 	loopbackNames = map[string]struct{}{

@@ -59,7 +59,7 @@
   - include mountpoints 预解析，处理 ZFS、重复设备和挂载变化。
   - 测试：复杂挂载 fixture、热插拔、错误挂载、刷新、benchmark。
 
-- [ ] **A-105 socket/process 平台优化与低频采样**
+- [x] **A-105 socket/process 平台优化与低频采样**
   - Linux 避免完整 gopsutil connection object 数组。
   - 其他平台降低子进程/句柄创建并缓存平台资源。
   - 测试：大量连接/进程 fixture、权限不足、平台 build、benchmark。

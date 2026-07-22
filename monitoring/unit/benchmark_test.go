@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"bytes"
+	"strconv"
 	"testing"
 	"time"
 
@@ -23,6 +24,8 @@ var (
 	benchmarkProcMemory  *ProcMemInfo
 	benchmarkNetworkUp   uint64
 	benchmarkNetworkDown uint64
+	benchmarkProcNetRows int
+	benchmarkPIDCount    int
 )
 
 func BenchmarkCPU(b *testing.B) {
@@ -94,16 +97,67 @@ func BenchmarkDiskTopologyAndUsageRefresh(b *testing.B) {
 }
 
 func BenchmarkConnectionsCount(b *testing.B) {
+	benchmarkTCPCount, benchmarkUDPCount, _ = ConnectionsCount()
 	b.ReportAllocs()
+	b.ResetTimer()
 	for range b.N {
 		benchmarkTCPCount, benchmarkUDPCount, _ = ConnectionsCount()
 	}
 }
 
 func BenchmarkProcessCount(b *testing.B) {
+	benchmarkProcess = ProcessCount()
 	b.ReportAllocs()
+	b.ResetTimer()
 	for range b.N {
 		benchmarkProcess = ProcessCount()
+	}
+}
+
+func BenchmarkConnectionsCountPlatform(b *testing.B) {
+	b.ReportAllocs()
+	for range b.N {
+		counts, _ := connectionCountPlatform()
+		benchmarkTCPCount, benchmarkUDPCount = counts.tcp, counts.udp
+	}
+}
+
+func BenchmarkProcessCountPlatform(b *testing.B) {
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkProcess, _ = processCountPlatform()
+	}
+}
+
+func BenchmarkProcNetTableCount(b *testing.B) {
+	const rows = 10_000
+	var fixture bytes.Buffer
+	fixture.Grow(len(procNetHeader) + rows*96)
+	fixture.WriteString(procNetHeader)
+	line := []byte("    0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 1\n")
+	for range rows {
+		fixture.Write(line)
+	}
+	data := fixture.Bytes()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for range b.N {
+		benchmarkProcNetRows, _ = countProcNetTable(bytes.NewReader(data))
+	}
+}
+
+func BenchmarkProcessDirectoryNameCount(b *testing.B) {
+	const processes = 50_000
+	names := make([]string, 0, processes+2)
+	for index := range processes {
+		names = append(names, strconv.Itoa(index+1))
+	}
+	names = append(names, "self", "thread-self")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkPIDCount = countDecimalPIDs(names)
 	}
 }
 

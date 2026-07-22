@@ -94,3 +94,33 @@ GenerateReport 仍约 94.5～95.7ms；磁盘已经不再是报告热路径的平
 - 热插拔强制刷新、拓扑失败退避、单 mount 失败保留该组最后有效值；
 - 32 路并发冷启动只有一次拓扑/容量 source pass；
 - 超大平台计数器采用饱和加法，保证 `used <= total`。
+
+## A-105 socket/process 平台优化与低频采样
+
+socket 与 process 统计改为 5 秒低频快照，采样失败保留最后有效值，支持显式事件刷新。Linux socket 直接流式计数 `/proc/net/{tcp,tcp6,udp,udp6}`，不再物化 gopsutil 的完整连接对象；Linux process 使用 256 项分批目录读取和无分配 PID 判断。macOS process 改为原生 `sysctl kern.proc.all`，FreeBSD 使用内核 process API，Windows 使用可增长的 `EnumProcesses` 缓冲且不再每次加载 DLL/解析函数地址。
+
+macOS 平台 source 对比（`-benchtime=1x -count=10`）：
+
+| Source | 修改前 | A-105 后典型值 | 结果 |
+|---|---:|---:|---:|
+| socket count | 86.12ms，69KB，304 allocs | 32.6～35.2ms，约 62KB，210～213 allocs | TCP/UDP 两次枚举合并为一次，约快 2.4～2.6× |
+| process count | 33.46ms，738KB，93 allocs | 83～126µs，549KB，3 allocs | 删除 `ps` 子进程，约快 266～403× |
+
+稳态热路径（`-benchtime=1000x -count=5`）：
+
+| Benchmark | A-105 后 | 结果 |
+|---|---:|---:|
+| ConnectionsCount | 37.6～41.4ns，0 alloc | 报告只读低频快照 |
+| ProcessCount | 37.5～39.4ns，0 alloc | 报告只读低频快照 |
+| GenerateReport | 1.712～1.748ms，约 68.5KB，459 allocs | 从 A-104 的约 95ms 再降低约 54～56× |
+
+Linux 确定性压力 fixture：10,000 条 `/proc/net` socket 行约 120～137µs、1,072 B、2 allocs；50,000 个 process 目录名的 PID 分类约 107～110µs、0 分配。该结果不包含内核文件读取时间，但证明解析成本与内存不随连接对象复杂度膨胀。
+
+正确性验证包括：
+
+- 25,000 socket 行、空行、超长恶意行和 IPv4/IPv6 表计数；
+- 50,000 process 名称、非 PID 特殊目录和无分配分类；
+- 首次失败立即重试，暂时性错误保留 stale，成功后清除错误；
+- fake clock 周期、强制刷新、时钟回拨和 64 路并发冷读单 source call；
+- 非 Linux TCP/UDP socket 类型分类；
+- Linux amd64/arm64、Windows amd64、FreeBSD amd64、macOS arm64 的 `CGO_ENABLED=0 go build ./...`。
