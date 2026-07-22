@@ -1,11 +1,16 @@
 package netstatic
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -13,75 +18,107 @@ import (
 	gnet "github.com/shirou/gopsutil/v4/net"
 )
 
-/*
-统计每个网卡的流量情况，保存最近DataPreserveDay天的数据，每DetectInterval秒采集一次
-
-默认保存到当前目录下的net_static.json文件中
-net_static.json 中有字段 config，表示当前的配置，如果没有则使用默认值
-unix时间戳，单位秒
-
-所有操作都尽可能在内存中完成，避免频繁的IO操作
-
-只有在启动、停止和保存时，才会进行文件的读写操作
-*/
+// Netstatic keeps recent per-interface traffic deltas in memory and writes a
+// compact snapshot periodically. The on-disk schema is intentionally stable.
 var (
-	DefaultDataPreserveDay = 31.0      // in days，保存最近多少天的数据，过期数据会被删除
-	DefaultDetectInterval  = 2.0       // in seconds，采集间隔
-	DefaultSaveInterval    = 60.0 * 10 // in seconds，写入到磁盘的间隔，避免大量IO操作，保存到文件的间隔也是这个值，而不是DetectInterval
+	DefaultDataPreserveDay = 31.0
+	DefaultDetectInterval  = 2.0
+	DefaultSaveInterval    = 60.0 * 10
 	SaveFilePath           = "./net_static.json"
 )
 
-var (
-	staticCache map[string][]TrafficData // key: interface name，统计缓存，当前没有被保存到文件中的，间隔DetectInterval，触发保存时，合并所有的tx/rx数据，以SaveInterval，写入到文件中，随后清空缓存
-	config      NetStaticConfig
-)
+const maxSnapshotBytes int64 = 64 << 20
 
-// NetStatic 网卡流量统计数据
+// NetStatic is the stable net_static.json representation.
 type NetStatic struct {
-	Interfaces map[string][]TrafficData `json:"interfaces"` // key: interface name
+	Interfaces map[string][]TrafficData `json:"interfaces"`
 	Config     NetStaticConfig          `json:"config"`
 }
 
 type NetStaticConfig struct {
-	DataPreserveDay float64  `json:"data_preserve_day"` // in days，保存最近多少天的数据，过期数据会被删除
-	DetectInterval  float64  `json:"detect_interval"`   // in seconds，采集间隔
-	SaveInterval    float64  `json:"save_interval"`     // in seconds，写入到磁盘的间隔，避免大量IO操作
-	Nics            []string `json:"nics"`              // 仅监控指定的网卡名称列表，空表示监控所有网卡
+	DataPreserveDay float64  `json:"data_preserve_day"`
+	DetectInterval  float64  `json:"detect_interval"`
+	SaveInterval    float64  `json:"save_interval"`
+	Nics            []string `json:"nics"`
 }
 
 type TrafficData struct {
 	Timestamp uint64 `json:"timestamp"`
-	Tx        uint64 `json:"tx"` // 第n与n-1次采集的差值
-	Rx        uint64 `json:"rx"` // 第n与n-1次采集的差值
+	Tx        uint64 `json:"tx"`
+	Rx        uint64 `json:"rx"`
+}
+
+type counters struct {
+	Tx uint64
+	Rx uint64
+}
+
+// A prefixSeries answers an inclusive timestamp range in O(log n). Prefix
+// values deliberately use uint64 modular arithmetic, matching the old summing
+// behavior even for a malformed snapshot whose total overflows uint64.
+type prefixSeries struct {
+	timestamps []uint64
+	txPrefix   []uint64
+	rxPrefix   []uint64
+}
+
+type trafficIndex map[string]prefixSeries
+
+type workerGeneration struct {
+	id     uint64
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	config NetStaticConfig
 }
 
 var (
-	mu           sync.RWMutex
-	running      bool
-	detectTicker *time.Ticker
-	saveTicker   *time.Ticker
-	stopCh       chan struct{}
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
 
-	// 内存持久区（与文件内容一致，但仅在启动、保存、停止时与磁盘交互）
-	store NetStatic
+	staticCache   = make(map[string][]TrafficData)
+	store         = NetStatic{Interfaces: make(map[string][]TrafficData)}
+	config        = configOrDefault(NetStaticConfig{})
+	lastCounters  = make(map[string]counters)
+	persistedTree = make(trafficIndex)
+	pendingTree   = make(trafficIndex)
 
-	// 上次采集到的累计字节数（用于计算 delta）
-	lastCounters = map[string]struct{ Tx, Rx uint64 }{}
+	running          bool
+	activeGeneration *workerGeneration
+	nextGenerationID uint64
+
+	readIOCounters = gnet.IOCounters
+	clockNow       = time.Now
+	writeSnapshot  = persistSnapshot
 )
 
-func nowUnix() uint64 { return uint64(time.Now().Unix()) }
+func configOrDefault(c NetStaticConfig) NetStaticConfig {
+	if !positiveFinite(c.DataPreserveDay) {
+		c.DataPreserveDay = DefaultDataPreserveDay
+	}
+	if !validInterval(c.DetectInterval) {
+		c.DetectInterval = DefaultDetectInterval
+	}
+	if !validInterval(c.SaveInterval) {
+		c.SaveInterval = DefaultSaveInterval
+	}
+	c.Nics = cloneStrings(c.Nics)
+	return c
+}
 
-// isNicAllowed 判断网卡是否在监控白名单内；当未配置白名单（空切片或nil）时，允许所有网卡
-func isNicAllowed(name string) bool {
-	if len(config.Nics) == 0 {
-		return true
+func positiveFinite(value float64) bool {
+	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func validInterval(seconds float64) bool {
+	return positiveFinite(seconds) && time.Duration(seconds*float64(time.Second)) > 0
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
 	}
-	for _, n := range config.Nics {
-		if n == name {
-			return true
-		}
-	}
-	return false
+	return append([]string(nil), values...)
 }
 
 func ensureInitLocked() {
@@ -91,458 +128,616 @@ func ensureInitLocked() {
 	if staticCache == nil {
 		staticCache = make(map[string][]TrafficData)
 	}
-	if config.DataPreserveDay == 0 {
-		config.DataPreserveDay = DefaultDataPreserveDay
+	if lastCounters == nil {
+		lastCounters = make(map[string]counters)
 	}
-	if config.DetectInterval == 0 {
-		config.DetectInterval = DefaultDetectInterval
+	if persistedTree == nil {
+		persistedTree = make(trafficIndex)
 	}
-	if config.SaveInterval == 0 {
-		config.SaveInterval = DefaultSaveInterval
+	if pendingTree == nil {
+		pendingTree = make(trafficIndex)
+	}
+	config = configOrDefault(config)
+}
+
+func cloneNetStatic(source NetStatic) NetStatic {
+	result := NetStatic{
+		Interfaces: make(map[string][]TrafficData, len(source.Interfaces)),
+		Config:     configOrDefault(source.Config),
+	}
+	for name, series := range source.Interfaces {
+		result.Interfaces[name] = append([]TrafficData(nil), series...)
+	}
+	return result
+}
+
+func normalizedRecords(source map[string][]TrafficData) map[string][]TrafficData {
+	result := make(map[string][]TrafficData, len(source))
+	for name, records := range source {
+		if name == "" || len(records) == 0 {
+			continue
+		}
+		series := append([]TrafficData(nil), records...)
+		sort.SliceStable(series, func(i, j int) bool {
+			return series[i].Timestamp < series[j].Timestamp
+		})
+		result[name] = series
+	}
+	return result
+}
+
+func buildTrafficIndex(source map[string][]TrafficData) trafficIndex {
+	index := make(trafficIndex, len(source))
+	for name, records := range source {
+		if len(records) == 0 {
+			continue
+		}
+		series := prefixSeries{
+			timestamps: make([]uint64, len(records)),
+			txPrefix:   make([]uint64, len(records)+1),
+			rxPrefix:   make([]uint64, len(records)+1),
+		}
+		for i, record := range records {
+			series.timestamps[i] = record.Timestamp
+			series.txPrefix[i+1] = series.txPrefix[i] + record.Tx
+			series.rxPrefix[i+1] = series.rxPrefix[i] + record.Rx
+		}
+		index[name] = series
+	}
+	return index
+}
+
+func appendIndex(index trafficIndex, name string, record TrafficData, source []TrafficData) {
+	series, ok := index[name]
+	if !ok || len(series.timestamps) == 0 {
+		index[name] = prefixSeries{
+			timestamps: []uint64{record.Timestamp},
+			txPrefix:   []uint64{0, record.Tx},
+			rxPrefix:   []uint64{0, record.Rx},
+		}
+		return
+	}
+	if record.Timestamp < series.timestamps[len(series.timestamps)-1] {
+		index[name] = buildTrafficIndex(map[string][]TrafficData{name: source})[name]
+		return
+	}
+	series.timestamps = append(series.timestamps, record.Timestamp)
+	series.txPrefix = append(series.txPrefix, series.txPrefix[len(series.txPrefix)-1]+record.Tx)
+	series.rxPrefix = append(series.rxPrefix, series.rxPrefix[len(series.rxPrefix)-1]+record.Rx)
+	index[name] = series
+}
+
+func (series prefixSeries) sumBetween(start, end uint64) (uint64, uint64, bool) {
+	left := 0
+	if start != 0 {
+		left = sort.Search(len(series.timestamps), func(i int) bool {
+			return series.timestamps[i] >= start
+		})
+	}
+	right := len(series.timestamps)
+	if end != 0 {
+		right = sort.Search(len(series.timestamps), func(i int) bool {
+			return series.timestamps[i] > end
+		})
+	}
+	if left >= right {
+		return 0, 0, false
+	}
+	return series.txPrefix[right] - series.txPrefix[left], series.rxPrefix[right] - series.rxPrefix[left], true
+}
+
+func sumTrafficBetweenIndexed(persisted, pending trafficIndex, start, end uint64) map[string]TrafficData {
+	result := make(map[string]TrafficData, len(persisted)+len(pending))
+	addIndex := func(index trafficIndex) {
+		for name, series := range index {
+			tx, rx, found := series.sumBetween(start, end)
+			if !found || (tx == 0 && rx == 0) {
+				continue
+			}
+			current := result[name]
+			current.Tx += tx
+			current.Rx += rx
+			result[name] = current
+		}
+	}
+	addIndex(persisted)
+	addIndex(pending)
+	return result
+}
+
+// sumTrafficBetween is retained as the reference implementation for
+// correctness tests and before/after benchmarks.
+func sumTrafficBetween(persisted, pending map[string][]TrafficData, start, end uint64) map[string]TrafficData {
+	result := make(map[string]TrafficData)
+	inRange := func(timestamp uint64) bool {
+		return (start == 0 || timestamp >= start) && (end == 0 || timestamp <= end)
+	}
+	addSource := func(source map[string][]TrafficData) {
+		for name, records := range source {
+			var tx, rx uint64
+			for _, record := range records {
+				if inRange(record.Timestamp) {
+					tx += record.Tx
+					rx += record.Rx
+				}
+			}
+			if tx == 0 && rx == 0 {
+				continue
+			}
+			current := result[name]
+			current.Tx += tx
+			current.Rx += rx
+			result[name] = current
+		}
+	}
+	addSource(persisted)
+	addSource(pending)
+	return result
+}
+
+func safeDelta(current, previous uint64) uint64 {
+	if current >= previous {
+		return current - previous
+	}
+	return 0
+}
+
+func nicAllowed(name string, nics []string) bool {
+	if len(nics) == 0 {
+		return true
+	}
+	for _, allowed := range nics {
+		if name == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func applyCountersLocked(samples []gnet.IOCountersStat, timestamp uint64) {
+	ensureInitLocked()
+	for _, sample := range samples {
+		if !nicAllowed(sample.Name, config.Nics) {
+			continue
+		}
+		current := counters{Tx: sample.BytesSent, Rx: sample.BytesRecv}
+		previous, exists := lastCounters[sample.Name]
+		if exists {
+			record := TrafficData{
+				Timestamp: timestamp,
+				Tx:        safeDelta(current.Tx, previous.Tx),
+				Rx:        safeDelta(current.Rx, previous.Rx),
+			}
+			if record.Tx > 0 || record.Rx > 0 {
+				staticCache[sample.Name] = append(staticCache[sample.Name], record)
+				appendIndex(pendingTree, sample.Name, record, staticCache[sample.Name])
+			}
+		}
+		lastCounters[sample.Name] = current
 	}
 }
 
-func loadFromFileLocked() error {
-	// 不存在则用默认配置
-	f, err := os.Open(SaveFilePath)
+func flushCacheLocked(timestamp uint64) {
+	ensureInitLocked()
+	for name, records := range staticCache {
+		var tx, rx uint64
+		for _, record := range records {
+			tx += record.Tx
+			rx += record.Rx
+		}
+		if tx == 0 && rx == 0 {
+			continue
+		}
+		record := TrafficData{Timestamp: timestamp, Tx: tx, Rx: rx}
+		store.Interfaces[name] = append(store.Interfaces[name], record)
+		appendIndex(persistedTree, name, record, store.Interfaces[name])
+	}
+	staticCache = make(map[string][]TrafficData)
+	pendingTree = make(trafficIndex)
+}
+
+func retentionDuration(days float64) time.Duration {
+	hours := days * 24
+	maxHours := float64(math.MaxInt64) / float64(time.Hour)
+	if hours >= maxHours {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(hours * float64(time.Hour))
+}
+
+func purgeExpiredLocked(now time.Time) {
+	ensureInitLocked()
+	cutoffTime := now.Add(-retentionDuration(config.DataPreserveDay)).Unix()
+	var cutoff uint64
+	if cutoffTime > 0 {
+		cutoff = uint64(cutoffTime)
+	}
+	for name, records := range store.Interfaces {
+		first := sort.Search(len(records), func(i int) bool {
+			return records[i].Timestamp >= cutoff
+		})
+		if first == len(records) {
+			delete(store.Interfaces, name)
+			continue
+		}
+		if first > 0 {
+			store.Interfaces[name] = append([]TrafficData(nil), records[first:]...)
+		}
+	}
+	persistedTree = buildTrafficIndex(store.Interfaces)
+}
+
+func snapshotLocked() NetStatic {
+	ensureInitLocked()
+	store.Config = configOrDefault(config)
+	return cloneNetStatic(store)
+}
+
+func loadSnapshot(path string) (NetStatic, bool, error) {
+	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			ensureInitLocked()
-			store.Config = configOrDefault(config)
-			return nil
+			return NetStatic{}, false, nil
 		}
-		return err
+		return NetStatic{}, false, err
 	}
-	defer f.Close()
+	defer file.Close()
 
-	data, err := io.ReadAll(f)
+	info, err := file.Stat()
 	if err != nil {
-		return err
+		return NetStatic{}, false, err
+	}
+	if info.Size() > maxSnapshotBytes {
+		return NetStatic{}, false, fmt.Errorf("netstatic snapshot exceeds %d bytes", maxSnapshotBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxSnapshotBytes+1))
+	if err != nil {
+		return NetStatic{}, false, err
+	}
+	if int64(len(data)) > maxSnapshotBytes {
+		return NetStatic{}, false, fmt.Errorf("netstatic snapshot exceeds %d bytes", maxSnapshotBytes)
 	}
 	if len(data) == 0 {
-		ensureInitLocked()
-		store.Config = configOrDefault(config)
-		return nil
+		return NetStatic{}, false, nil
 	}
-	var ns NetStatic
-	if err := json.Unmarshal(data, &ns); err != nil {
-		// 文件损坏则不阻塞使用，采用默认并备份坏文件
-		_ = os.Rename(SaveFilePath, SaveFilePath+".bak")
-		ensureInitLocked()
-		store.Config = configOrDefault(config)
-		return nil
+
+	var snapshot NetStatic
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		if backupErr := backupCorruptSnapshot(path); backupErr != nil {
+			return NetStatic{}, false, errors.Join(err, backupErr)
+		}
+		return NetStatic{}, false, nil
 	}
-	store = ns
-	config = configOrDefault(ns.Config)
-	ensureInitLocked()
-	// 启动时清理过期数据
-	purgeExpiredLocked()
-	return nil
+	snapshot.Interfaces = normalizedRecords(snapshot.Interfaces)
+	snapshot.Config = configOrDefault(snapshot.Config)
+	return snapshot, true, nil
 }
 
-func saveToFileLocked() (resultErr error) {
+func backupCorruptSnapshot(path string) error {
+	backup := path + ".bak"
+	if _, err := os.Lstat(backup); err == nil {
+		backup = fmt.Sprintf("%s.bak.%d", path, time.Now().UnixNano())
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Rename(path, backup)
+}
+
+func persistSnapshot(path string, snapshot NetStatic) (resultErr error) {
 	started := time.Now()
 	defer func() {
 		diagnostics.ObserveNetstaticSave(started, resultErr)
 	}()
-	// 确保目录存在
-	if err := os.MkdirAll(filepath.Dir(SaveFilePath), 0o755); err != nil {
+
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
-	// 写入时带上当前 config
-	store.Config = configOrDefault(config)
-	b, err := json.Marshal(store) // 紧凑格式（不缩进）
+	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
-	tmp := SaveFilePath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, SaveFilePath)
-}
-
-func configOrDefault(c NetStaticConfig) NetStaticConfig {
-	if c.DataPreserveDay == 0 {
-		c.DataPreserveDay = DefaultDataPreserveDay
-	}
-	if c.DetectInterval == 0 {
-		c.DetectInterval = DefaultDetectInterval
-	}
-	if c.SaveInterval == 0 {
-		c.SaveInterval = DefaultSaveInterval
-	}
-	return c
-}
-
-func purgeExpiredLocked() {
-	// 根据 DataPreserveDay 删除过期数据
-	ttl := time.Duration(config.DataPreserveDay * 24 * float64(time.Hour))
-	cutoff := uint64(time.Now().Add(-ttl).Unix())
-	for name, arr := range store.Interfaces {
-		// 仅保留 >= cutoff 的数据
-		kept := arr[:0]
-		for _, td := range arr {
-			if td.Timestamp >= cutoff {
-				kept = append(kept, td)
-			}
-		}
-		if len(kept) == 0 {
-			delete(store.Interfaces, name)
-		} else {
-			store.Interfaces[name] = kept
-		}
-	}
-}
-
-func safeDelta(cur, prev uint64) uint64 {
-	if cur >= prev {
-		return cur - prev
-	}
-	// 处理计数器回绕或重置，视为 0 增量
-	return 0
-}
-
-func sampleOnceLocked() {
-	ios, err := gnet.IOCounters(true)
+	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return
-	}
-	ts := nowUnix()
-	for _, io := range ios {
-		name := io.Name
-		// 仅监控指定网卡（当配置了 Nics 时）
-		if !isNicAllowed(name) {
-			continue
-		}
-		curTx := io.BytesSent
-		curRx := io.BytesRecv
-		prev, ok := lastCounters[name]
-		if ok {
-			dtx := safeDelta(curTx, prev.Tx)
-			drx := safeDelta(curRx, prev.Rx)
-			// 首次采样不记录
-			if dtx > 0 || drx > 0 {
-				staticCache[name] = append(staticCache[name], TrafficData{Timestamp: ts, Tx: dtx, Rx: drx})
-			} else {
-				// 即便为 0，也可以记录，但为了降低噪音与占用，这里忽略 0
-			}
-		}
-		lastCounters[name] = struct{ Tx, Rx uint64 }{Tx: curTx, Rx: curRx}
-	}
-}
-
-func flushCacheLocked(ts uint64) {
-	if len(staticCache) == 0 {
-		return
-	}
-	for name, arr := range staticCache {
-		var sumTx, sumRx uint64
-		for _, td := range arr {
-			sumTx += td.Tx
-			sumRx += td.Rx
-		}
-		if sumTx > 0 || sumRx > 0 {
-			store.Interfaces[name] = append(store.Interfaces[name], TrafficData{Timestamp: ts, Tx: sumTx, Rx: sumRx})
-		}
-	}
-	// 清空缓存
-	staticCache = make(map[string][]TrafficData)
-}
-
-// startGoroutinesLocked 启动采集和保存的 goroutines（调用前必须已持有锁）
-func startGoroutinesLocked() {
-	// 采集 goroutine
-	go func() {
-		for {
-			select {
-			case <-detectTicker.C:
-				mu.Lock()
-				sampleOnceLocked()
-				mu.Unlock()
-			case <-stopCh:
-				return
-			}
-		}
-	}()
-
-	// 保存 goroutine
-	go func() {
-		for {
-			select {
-			case t := <-saveTicker.C:
-				mu.Lock()
-				flushCacheLocked(uint64(t.Unix()))
-				purgeExpiredLocked()
-				_ = saveToFileLocked()
-				mu.Unlock()
-			case <-stopCh:
-				return
-			}
-		}
-	}()
-}
-
-// GetNetStatic 获取当前的所有流量统计数据
-func GetNetStatic() (*NetStatic, error) {
-	mu.RLock()
-	defer mu.RUnlock()
-	ensureInitLocked()
-	// 合并 store + cache（cache 不合并为单点，直接以原样返回临时视图）
-	merged := NetStatic{Interfaces: map[string][]TrafficData{}, Config: configOrDefault(config)}
-	for name, arr := range store.Interfaces {
-		cp := make([]TrafficData, len(arr))
-		copy(cp, arr)
-		merged.Interfaces[name] = cp
-	}
-	for name, arr := range staticCache {
-		merged.Interfaces[name] = append(merged.Interfaces[name], arr...)
-	}
-	return &merged, nil
-}
-
-// StartOrContinue 开始或继续流量统计
-func StartOrContinue() error {
-	if running {
-		return nil
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	ensureInitLocked()
-	// 读取历史
-	if err := loadFromFileLocked(); err != nil {
 		return err
 	}
-	// 启动 ticker
-	detectTicker = time.NewTicker(time.Duration(config.DetectInterval * float64(time.Second)))
-	saveTicker = time.NewTicker(time.Duration(config.SaveInterval * float64(time.Second)))
-	stopCh = make(chan struct{})
-	running = true
+	temporaryPath := temporary.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
 
-	// 启动 goroutines
-	startGoroutinesLocked()
+	if err := temporary.Chmod(0o644); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(encoded); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	committed = true
+	return syncDirectory(directory)
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil && runtime.GOOS != "windows" {
+		return err
+	}
 	return nil
 }
 
-// Clear 清除所有流量统计数据
+func installSnapshotLocked(snapshot NetStatic, loaded bool) {
+	ensureInitLocked()
+	if loaded {
+		store = cloneNetStatic(snapshot)
+		config = configOrDefault(snapshot.Config)
+	} else {
+		config = configOrDefault(config)
+		store.Config = config
+	}
+	store.Interfaces = normalizedRecords(store.Interfaces)
+	staticCache = make(map[string][]TrafficData)
+	lastCounters = make(map[string]counters)
+	pendingTree = make(trafficIndex)
+	persistedTree = buildTrafficIndex(store.Interfaces)
+	purgeExpiredLocked(clockNow())
+}
+
+func startGenerationLocked() {
+	nextGenerationID++
+	ctx, cancel := context.WithCancel(context.Background())
+	generation := &workerGeneration{
+		id:     nextGenerationID,
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+		config: configOrDefault(config),
+	}
+	activeGeneration = generation
+	running = true
+	go runGeneration(generation)
+}
+
+func generationIsActiveLocked(generation *workerGeneration) bool {
+	return running && activeGeneration == generation
+}
+
+func runGeneration(generation *workerGeneration) {
+	detectTicker := time.NewTicker(time.Duration(generation.config.DetectInterval * float64(time.Second)))
+	saveTicker := time.NewTicker(time.Duration(generation.config.SaveInterval * float64(time.Second)))
+	defer func() {
+		detectTicker.Stop()
+		saveTicker.Stop()
+		close(generation.done)
+	}()
+
+	for {
+		select {
+		case <-generation.ctx.Done():
+			return
+		case <-detectTicker.C:
+			samples, err := readIOCounters(true)
+			if err != nil {
+				continue
+			}
+			timestamp := uint64(clockNow().Unix())
+			mu.Lock()
+			if generationIsActiveLocked(generation) {
+				applyCountersLocked(samples, timestamp)
+			}
+			mu.Unlock()
+		case tick := <-saveTicker.C:
+			mu.Lock()
+			if !generationIsActiveLocked(generation) {
+				mu.Unlock()
+				continue
+			}
+			flushCacheLocked(uint64(tick.Unix()))
+			purgeExpiredLocked(clockNow())
+			snapshot := snapshotLocked()
+			path := SaveFilePath
+			mu.Unlock()
+			_ = writeSnapshot(path, snapshot)
+		}
+	}
+}
+
+// GetNetStatic returns an immutable copy of persisted and pending traffic.
+func GetNetStatic() (*NetStatic, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+	result := cloneNetStatic(NetStatic{Interfaces: store.Interfaces, Config: config})
+	for name, records := range staticCache {
+		result.Interfaces[name] = append(result.Interfaces[name], records...)
+	}
+	return &result, nil
+}
+
+// StartOrContinue loads the snapshot and starts exactly one worker generation.
+func StartOrContinue() error {
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
+
+	mu.RLock()
+	alreadyRunning := running
+	path := SaveFilePath
+	mu.RUnlock()
+	if alreadyRunning {
+		return nil
+	}
+
+	snapshot, loaded, err := loadSnapshot(path)
+	if err != nil {
+		return err
+	}
+	mu.Lock()
+	installSnapshotLocked(snapshot, loaded)
+	startGenerationLocked()
+	mu.Unlock()
+	return nil
+}
+
+// Clear removes in-memory traffic. The next periodic or final save persists it.
 func Clear() error {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureInitLocked()
 	store.Interfaces = make(map[string][]TrafficData)
 	staticCache = make(map[string][]TrafficData)
-	lastCounters = map[string]struct{ Tx, Rx uint64 }{}
-	// 不落盘，等下次保存或停止时写
+	lastCounters = make(map[string]counters)
+	persistedTree = make(trafficIndex)
+	pendingTree = make(trafficIndex)
 	return nil
 }
 
-// Stop 停止流量统计
+// Stop joins the active generation before producing the final durable snapshot.
 func Stop() error {
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
+
 	mu.Lock()
 	if !running {
 		mu.Unlock()
 		return nil
 	}
+	generation := activeGeneration
+	activeGeneration = nil
 	running = false
-	if detectTicker != nil {
-		detectTicker.Stop()
-	}
-	if saveTicker != nil {
-		saveTicker.Stop()
-	}
-	close(stopCh)
-	// 最后一轮 flush + 保存
-	flushCacheLocked(nowUnix())
-	purgeExpiredLocked()
-	err := saveToFileLocked()
 	mu.Unlock()
-	return err
+
+	if generation != nil {
+		generation.cancel()
+		<-generation.done
+	}
+
+	mu.Lock()
+	flushCacheLocked(uint64(clockNow().Unix()))
+	purgeExpiredLocked(clockNow())
+	snapshot := snapshotLocked()
+	path := SaveFilePath
+	mu.Unlock()
+	return writeSnapshot(path, snapshot)
 }
 
-// GetNetStaticBetween 获取指定时间段内的流量统计数据，start和end为unix时间戳
+// GetNetStaticBetween returns the records in the inclusive time range.
 func GetNetStaticBetween(start, end uint64) (*NetStatic, error) {
 	mu.RLock()
 	defer mu.RUnlock()
-	ensureInitLocked()
-	res := NetStatic{Interfaces: map[string][]TrafficData{}, Config: configOrDefault(config)}
-	inRange := func(ts uint64) bool { return (start == 0 || ts >= start) && (end == 0 || ts <= end) }
-	for name, arr := range store.Interfaces {
-		var filtered []TrafficData
-		for _, td := range arr {
-			if inRange(td.Timestamp) {
-				filtered = append(filtered, td)
-			}
-		}
-		if len(filtered) > 0 {
-			res.Interfaces[name] = filtered
-		}
+	result := NetStatic{Interfaces: make(map[string][]TrafficData), Config: configOrDefault(config)}
+	inRange := func(timestamp uint64) bool {
+		return (start == 0 || timestamp >= start) && (end == 0 || timestamp <= end)
 	}
-	// 合并缓存
-	for name, arr := range staticCache {
-		for _, td := range arr {
-			if inRange(td.Timestamp) {
-				res.Interfaces[name] = append(res.Interfaces[name], td)
+	addSource := func(source map[string][]TrafficData) {
+		for name, records := range source {
+			for _, record := range records {
+				if inRange(record.Timestamp) {
+					result.Interfaces[name] = append(result.Interfaces[name], record)
+				}
 			}
 		}
 	}
-	return &res, nil
+	addSource(store.Interfaces)
+	addSource(staticCache)
+	return &result, nil
 }
 
-// GetTotalTraffic 获取总流量统计数据, key为网卡名称, value为对应的流量数据总和
+// GetTotalTraffic returns totals for all retained traffic.
 func GetTotalTraffic() (map[string]TrafficData, error) {
-	mu.RLock()
-	defer mu.RUnlock()
-	ensureInitLocked()
-	res := map[string]TrafficData{}
-	add := func(name string, tx, rx uint64) {
-		cur := res[name]
-		cur.Tx += tx
-		cur.Rx += rx
-		res[name] = cur
-	}
-	for name, arr := range store.Interfaces {
-		var tx, rx uint64
-		for _, td := range arr {
-			tx += td.Tx
-			rx += td.Rx
-		}
-		add(name, tx, rx)
-	}
-	for name, arr := range staticCache {
-		var tx, rx uint64
-		for _, td := range arr {
-			tx += td.Tx
-			rx += td.Rx
-		}
-		add(name, tx, rx)
-	}
-	return res, nil
+	return GetTotalTrafficBetween(0, 0)
 }
 
-// GetTotalTrafficBetween 获取指定时间段内的总流量统计数据，start和end为unix时间戳
+// GetTotalTrafficBetween answers an inclusive range from prefix indexes. Its
+// cost is O(number of interfaces * log(records per interface)), independent of
+// the number of retained buckets scanned by the old implementation.
 func GetTotalTrafficBetween(start, end uint64) (map[string]TrafficData, error) {
 	started := time.Now()
 	mu.RLock()
-	defer mu.RUnlock()
-	ensureInitLocked()
-	result := sumTrafficBetween(store.Interfaces, staticCache, start, end)
+	result := sumTrafficBetweenIndexed(persistedTree, pendingTree, start, end)
+	mu.RUnlock()
 	diagnostics.ObserveNetstaticQuery(started, nil)
 	return result, nil
 }
 
-func sumTrafficBetween(persisted, pending map[string][]TrafficData, start, end uint64) map[string]TrafficData {
-	res := map[string]TrafficData{}
-	inRange := func(ts uint64) bool { return (start == 0 || ts >= start) && (end == 0 || ts <= end) }
-	add := func(name string, tx, rx uint64) {
-		cur := res[name]
-		cur.Tx += tx
-		cur.Rx += rx
-		res[name] = cur
+// SetNewConfig atomically replaces the worker generation when running. A
+// detached generation is always joined before a new generation can start.
+func SetNewConfig(newConfig NetStaticConfig) error {
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
+
+	mu.Lock()
+	ensureInitLocked()
+	wasRunning := running
+	oldGeneration := activeGeneration
+	if oldGeneration != nil {
+		activeGeneration = nil
 	}
-	for name, arr := range persisted {
-		var tx, rx uint64
-		for _, td := range arr {
-			if inRange(td.Timestamp) {
-				tx += td.Tx
-				rx += td.Rx
+
+	// Preserve pending traffic before changing NIC policy.
+	flushCacheLocked(uint64(clockNow().Unix()))
+	if newConfig.DataPreserveDay != 0 {
+		config.DataPreserveDay = newConfig.DataPreserveDay
+	}
+	if newConfig.DetectInterval != 0 {
+		config.DetectInterval = newConfig.DetectInterval
+	}
+	if newConfig.SaveInterval != 0 {
+		config.SaveInterval = newConfig.SaveInterval
+	}
+	if newConfig.Nics != nil {
+		config.Nics = cloneStrings(newConfig.Nics)
+	}
+	config = configOrDefault(config)
+	store.Config = config
+	purgeExpiredLocked(clockNow())
+
+	if len(config.Nics) > 0 {
+		for name := range lastCounters {
+			if !nicAllowed(name, config.Nics) {
+				delete(lastCounters, name)
 			}
 		}
-		if tx > 0 || rx > 0 {
-			add(name, tx, rx)
-		}
 	}
-	for name, arr := range pending {
-		var tx, rx uint64
-		for _, td := range arr {
-			if inRange(td.Timestamp) {
-				tx += td.Tx
-				rx += td.Rx
-			}
-		}
-		if tx > 0 || rx > 0 {
-			add(name, tx, rx)
-		}
+	snapshot := snapshotLocked()
+	path := SaveFilePath
+	mu.Unlock()
+
+	if oldGeneration != nil {
+		oldGeneration.cancel()
+		<-oldGeneration.done
 	}
-	return res
+	persistErr := writeSnapshot(path, snapshot)
+
+	if wasRunning {
+		mu.Lock()
+		startGenerationLocked()
+		mu.Unlock()
+	}
+	return persistErr
 }
 
-// SetNewConfig 设置新的配置，config中的值如果为0则表示不修改对应的配置项
-func SetNewConfig(newCfg NetStaticConfig) error {
+// ForceReplaceRecord replaces retained history using a defensive, sorted copy.
+func ForceReplaceRecord(records map[string][]TrafficData) error {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureInitLocked()
-	// 合并新配置
-	if newCfg.DataPreserveDay != 0 {
-		store.Config.DataPreserveDay = newCfg.DataPreserveDay
-	}
-	if newCfg.DetectInterval != 0 {
-		store.Config.DetectInterval = newCfg.DetectInterval
-	}
-	if newCfg.SaveInterval != 0 {
-		store.Config.SaveInterval = newCfg.SaveInterval
-	}
-	// Nics: nil 表示不修改；非 nil 则更新（空切片表示监控所有网卡）
-	if newCfg.Nics != nil {
-		// 做一份拷贝以避免外部切片后续修改影响内部配置
-		tmp := make([]string, len(newCfg.Nics))
-		copy(tmp, newCfg.Nics)
-		store.Config.Nics = tmp
-	}
-	// 更新生效配置
-	cfg := configOrDefault(store.Config)
-	store.Config = cfg
-	config = cfg
-	// 重新配置 ticker（若运行中）
-	if running {
-		// 先停止旧的 ticker 和 goroutines
-		if detectTicker != nil {
-			detectTicker.Stop()
-		}
-		if saveTicker != nil {
-			saveTicker.Stop()
-		}
-		close(stopCh)
-
-		// 重新创建 ticker 和 channel
-		detectTicker = time.NewTicker(time.Duration(cfg.DetectInterval * float64(time.Second)))
-		saveTicker = time.NewTicker(time.Duration(cfg.SaveInterval * float64(time.Second)))
-		stopCh = make(chan struct{})
-
-		// 重新启动 goroutines
-		startGoroutinesLocked()
-
-		// 当配置了指定网卡白名单时，清理不在白名单内的缓存与上次计数，避免无用数据积累
-		if len(cfg.Nics) > 0 {
-			allowed := make(map[string]struct{}, len(cfg.Nics))
-			for _, n := range cfg.Nics {
-				allowed[n] = struct{}{}
-			}
-			for name := range lastCounters {
-				if _, ok := allowed[name]; !ok {
-					delete(lastCounters, name)
-				}
-			}
-			for name := range staticCache {
-				if _, ok := allowed[name]; !ok {
-					delete(staticCache, name)
-				}
-			}
-		}
-	}
-	// 立即写盘
-	_ = saveToFileLocked()
-	// 同时做一次过期清理
-	purgeExpiredLocked()
-	return nil
-}
-
-func ForceReplaceRecord(rec map[string][]TrafficData) error {
-	mu.Lock()
-	defer mu.Unlock()
-	ensureInitLocked()
-	store.Interfaces = rec
-	// 不立即写盘，等下一次周期性保存或停止时写
-	// 同时做一次过期清理
-	purgeExpiredLocked()
+	store.Interfaces = normalizedRecords(records)
+	purgeExpiredLocked(clockNow())
 	return nil
 }

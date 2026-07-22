@@ -411,3 +411,28 @@ Apple M4/macOS、`GOMAXPROCS=1`、500,000 次稳态 benchmark：
 - 慢无限正文在 250ms 内返回 TTFB 且服务端收到取消，64KB 响应头炸弹拒绝；
 - HTTP parent context 取消、统一 retry budget、真实 TCP pin，以及 50ms DNS 不进入 TCP latency 的语义对照；
 - 专项测试 20 次、专项 race 10 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
+
+## A-304 netstatic 月累计索引与锁外持久化
+
+本地月流量不再每秒遍历最近 31 天的全部历史桶。持久区和未落盘区分别维护按网卡、时间排序的 prefix index；任意包含首尾边界的时间区间都通过两次二分和前缀差值汇总，复杂度从 O(全部历史桶) 降为 O(网卡数 × log(单网卡桶数))。加载、强制替换、过期清理和 cache flush 都同步维护索引；counter 回绕/重置继续按零增量处理，不会制造月流量尖峰。
+
+周期保存现在只在数据锁内合并 cache 并复制不可变 snapshot，JSON 编码、临时文件写入、文件 `fsync`、原子 `rename` 和目录 `fsync` 全部在锁外完成。临时文件位于目标文件同目录，失败自动清理且不覆盖旧目标；输入文件限制为 64MiB，损坏 JSON 会移动为唯一 `.bak` 后使用安全空状态恢复。磁盘阻塞期间汇总查询和采样不再被全局锁一起阻塞。
+
+start/reload/stop 由递增 generation 管理。生命周期互斥保证并发 start 只创建一代 worker；reload 先分离、取消并 join 旧代，持久化配置后再启动新代；stop 同样等待 worker 完整退出后才写最终 snapshot。旧代在系统计数读取完成后还会再次核对 active generation，因此无法在 reload/stop 后污染新状态或交叉覆盖最终文件。
+
+Apple M4/macOS、31 天、8 网卡、每 10 分钟一桶（共 35,712 桶）benchmark：
+
+| Query | ns/op | B/op | allocs/op | 结果 |
+|---|---:|---:|---:|---|
+| 线性 reference | 21,454～21,495 | 400 | 2 | 每次扫描 35,712 桶 |
+| prefix index | 296.6～300.4 | 400 | 2 | 只查询 8 个网卡，约快 71～72× |
+
+正确性、持久化和并发验证包括：
+
+- 月切换、包含边界、空区间、persisted + pending 合并与线性 reference 逐项一致；
+- 首次计数、正常差分、counter reset 后恢复采样且不产生异常增量；
+- snapshot round trip、乱序输入规范化、损坏文件备份恢复和 64MiB 读取边界；
+- 失败写入保留目标内容并清理同目录临时文件；
+- 阻塞磁盘写入期间查询仍可立即完成，证明 marshal/write 不持有数据锁；
+- 8 路并发 start 只创建一个 generation，reload/stop 返回前旧 worker 已 join；
+- 并发查询、快照读取和采样压力，以及专项 race、全量 unit/vet/race 回归。

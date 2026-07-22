@@ -1,6 +1,9 @@
 package netstatic
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 var benchmarkTrafficTotals map[string]TrafficData
 
@@ -14,7 +17,7 @@ func BenchmarkSumTrafficBetween31Days(b *testing.B) {
 
 	persisted := make(map[string][]TrafficData, nicCount)
 	for nic := 0; nic < nicCount; nic++ {
-		name := "benchmark-nic-" + string(rune('a'+nic))
+		name := fmt.Sprintf("benchmark-nic-%d", nic)
 		series := make([]TrafficData, 0, bucketsPerDay*days)
 		for bucket := 0; bucket < bucketsPerDay*days; bucket++ {
 			series = append(series, TrafficData{
@@ -26,11 +29,20 @@ func BenchmarkSumTrafficBetween31Days(b *testing.B) {
 		persisted[name] = series
 	}
 	end := start + uint64(bucketsPerDay*days*600)
+	index := buildTrafficIndex(persisted)
 
-	b.ReportAllocs()
-	b.ReportMetric(float64(nicCount*bucketsPerDay*days), "buckets/op")
-	b.ResetTimer()
-	for range b.N {
-		benchmarkTrafficTotals = sumTrafficBetween(persisted, nil, start, end)
-	}
+	b.Run("linear-reference", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ReportMetric(float64(nicCount*bucketsPerDay*days), "buckets/op")
+		for range b.N {
+			benchmarkTrafficTotals = sumTrafficBetween(persisted, nil, start, end)
+		}
+	})
+	b.Run("prefix-index", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ReportMetric(float64(nicCount), "interfaces/op")
+		for range b.N {
+			benchmarkTrafficTotals = sumTrafficBetweenIndexed(index, nil, start, end)
+		}
+	})
 }

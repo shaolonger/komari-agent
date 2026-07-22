@@ -124,7 +124,7 @@
   - DNS 时间和连接时间统计语义明确。
   - 测试：keep-alive、慢 body、状态码、TLS、取消、benchmark。
 
-- [ ] **A-304 netstatic 月累计索引与锁外持久化**
+- [x] **A-304 netstatic 月累计索引与锁外持久化**
   - 月流量查询 O(网卡数)/O(log n)。
   - 锁内 snapshot，锁外 marshal/write；sync + atomic rename。
   - generation 化 start/reload/stop。
