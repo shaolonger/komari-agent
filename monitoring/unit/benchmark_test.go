@@ -8,6 +8,8 @@ import (
 var (
 	benchmarkCPU         CpuInfo
 	benchmarkRAM         RamInfo
+	benchmarkMemory      MemoryInfo
+	benchmarkStaticHost  StaticHostInfo
 	benchmarkDisk        DiskInfo
 	benchmarkTCPCount    int
 	benchmarkUDPCount    int
@@ -38,6 +40,22 @@ func BenchmarkSwap(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
 		benchmarkRAM = Swap()
+	}
+}
+
+func BenchmarkMemory(b *testing.B) {
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkMemory = Memory()
+	}
+}
+
+func BenchmarkStaticHostInfoCached(b *testing.B) {
+	benchmarkStaticHost = GetStaticHostInfo()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkStaticHost = GetStaticHostInfo()
 	}
 }
 

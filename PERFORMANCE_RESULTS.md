@@ -31,3 +31,33 @@ go test ./monitoring/unit ./monitoring \
 - 旧 JSON 字段和公开函数签名保持不变；
 - 完整 unit、vet、race 和 benchmark 回归。
 
+## A-103 内存共享采样与静态主机信息缓存
+
+Linux 报告路径现在只读取一次 `/proc/meminfo`，由同一不可变输入同时计算 RAM 与 Swap；CPU 型号、架构、核心数、OS、kernel 和虚拟化信息采用并发安全的启动缓存，并提供显式刷新入口。刷新失败保留最后一个有效值，首次失败则允许后续调用重试。
+
+验证命令：
+
+```sh
+go test ./monitoring/unit ./monitoring \
+  -run '^$' \
+  -bench 'Benchmark(Memory|RAM|Swap|StaticHostInfoCached|CPU|GenerateReport)$' \
+  -benchtime=1x -benchmem -count=10
+```
+
+Apple M4/macOS 热路径结果：
+
+| Benchmark | A-102 后 | A-103 后典型值 | 结果 |
+|---|---:|---:|---:|
+| CPU | 474,500 ns/op | 14,042～54,000 ns/op | 静态信息不再重复探测；热调用约快 9～34× |
+| StaticHostInfoCached | 无 | 42～125 ns/op，0 alloc | 读缓存为极低开销热路径 |
+| GenerateReport allocations | 约 4,236 allocs/op（原始基线） | 1,123～1,134 allocs/op | 热报告分配约减少 73% |
+
+完整报告仍约 95～99ms，说明现阶段时延主导项已经转移到 socket/process 全量枚举；A-105 将针对这一热点。macOS 没有 `/proc/meminfo`，其 `Memory` 仍走原生平台 fallback（典型 16～32µs）；Linux 的共享读取和计算由固定 fixture、边界计数器与 race 测试覆盖。
+
+正确性验证包括：
+
+- 32 路并发首次读取只调用一次静态信息 loader；
+- 显式刷新发布新 generation，刷新失败保留旧值，首次失败可重试；
+- RAM/Swap 由同一 Linux fixture 计算，`includeCache` 与 htop-like 语义保持；
+- 异常大计数器不会整数下溢/溢出，也不会报告 `used > total`；
+- basic-info 和周期 report 复用同一静态缓存与内存快照。

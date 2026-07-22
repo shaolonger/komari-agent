@@ -30,16 +30,16 @@ func GenerateReport() []byte {
 	}
 
 	sampleStarted = time.Now()
-	ram := monitoring.Ram()
+	memory := monitoring.Memory()
+	ram := memory.RAM
 	diagnostics.ObserveSampler(diagnostics.SamplerRAM, sampleStarted, nil)
 	data["ram"] = map[string]interface{}{
 		"total": ram.Total,
 		"used":  ram.Used,
 	}
 
-	sampleStarted = time.Now()
-	swap := monitoring.Swap()
-	diagnostics.ObserveSampler(diagnostics.SamplerSwap, sampleStarted, nil)
+	swap := memory.Swap
+	diagnostics.ObserveSampler(diagnostics.SamplerSwap, time.Now(), nil)
 	data["swap"] = map[string]interface{}{
 		"total": swap.Total,
 		"used":  swap.Used,

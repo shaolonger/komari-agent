@@ -30,25 +30,23 @@ func buildCapabilityPayload() map[string]interface{} {
 }
 
 func buildBasicInfoPayload() map[string]interface{} {
-	cpu := monitoring.Cpu()
-
-	osname := monitoring.OSName()
-	kernelVersion := monitoring.KernelVersion()
+	static := monitoring.GetStaticHostInfo()
+	memory := monitoring.Memory()
 	ipv4, ipv6, _ := monitoring.GetIPAddress()
 
 	data := map[string]interface{}{
-		"cpu_name":       cpu.CPUName,
-		"cpu_cores":      cpu.CPUCores,
-		"arch":           cpu.CPUArchitecture,
-		"os":             osname,
-		"kernel_version": kernelVersion,
+		"cpu_name":       static.CPUName,
+		"cpu_cores":      static.CPUCores,
+		"arch":           static.CPUArchitecture,
+		"os":             static.OSName,
+		"kernel_version": static.KernelVersion,
 		"ipv4":           ipv4,
 		"ipv6":           ipv6,
-		"mem_total":      monitoring.Ram().Total,
-		"swap_total":     monitoring.Swap().Total,
+		"mem_total":      memory.RAM.Total,
+		"swap_total":     memory.Swap.Total,
 		"disk_total":     monitoring.Disk().Total,
 		"gpu_name":       monitoring.GpuName(),
-		"virtualization": monitoring.Virtualized(),
+		"virtualization": static.Virtualization,
 		"version":        update.CurrentVersion,
 	}
 

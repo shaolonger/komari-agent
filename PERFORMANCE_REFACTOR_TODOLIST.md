@@ -49,7 +49,7 @@
   - 使用真实 elapsed 和 counter reset/wrap 处理。
   - 测试：首次样本、正常差分、重置、时间漂移、NIC 过滤、对照测试、benchmark。
 
-- [ ] **A-103 内存/Swap 共享采样与静态主机信息缓存**
+- [x] **A-103 内存/Swap 共享采样与静态主机信息缓存**
   - 一次读取生成 RAM/Swap。
   - CPU 型号、核心、OS、kernel、虚拟化只在启动/事件刷新。
   - 测试：Linux fixture、平台 fallback、缓存刷新、错误 stale、benchmark。

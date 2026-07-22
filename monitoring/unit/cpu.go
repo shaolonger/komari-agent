@@ -34,34 +34,12 @@ type CpuInfo struct {
 }
 
 func Cpu() CpuInfo {
+	static := GetStaticHostInfo()
 	cpuinfo := CpuInfo{
-		CPUName:         "Unknown",
-		CPUArchitecture: runtime.GOARCH,
-		CPUCores:        1,
+		CPUName:         static.CPUName,
+		CPUArchitecture: static.CPUArchitecture,
+		CPUCores:        static.CPUCores,
 		CPUUsage:        0.0,
-	}
-
-	// 优先使用 gopsutil 获取 CPU 信息，避免触发 lscpu 在部分内核上的 lockdown 日志刷屏。
-	info, err := cpu.Info()
-	if err == nil && len(info) > 0 {
-		cpuinfo.CPUName = strings.TrimSpace(info[0].ModelName)
-		if cpuinfo.CPUName == "" {
-			if info[0].VendorID != "" || info[0].Family != "" {
-				cpuinfo.CPUName = strings.TrimSpace(info[0].VendorID + " " + info[0].Family)
-			}
-		}
-	}
-
-	if cpuinfo.CPUName == "Unknown" {
-		name, err := readCPUNameFromProc()
-		if err == nil && name != "" {
-			cpuinfo.CPUName = strings.TrimSpace(name)
-		}
-	}
-
-	cores, err := cpu.Counts(true)
-	if err == nil {
-		cpuinfo.CPUCores = cores
 	}
 
 	usage, err := defaultCPUUsageSampler.Sample()
