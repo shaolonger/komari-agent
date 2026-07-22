@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
@@ -83,6 +85,48 @@ func TestNewTaskTimesOutLongRunningCommand(t *testing.T) {
 	}
 	if result.finishedAt.IsZero() {
 		t.Fatal("expected finishedAt to be recorded")
+	}
+}
+
+func TestTaskCommandIsCanceledByAgentShutdownContext(t *testing.T) {
+	setTaskExecutionTimeout(t, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan struct {
+		output   string
+		exitCode int
+	}, 1)
+	go func() {
+		output, exitCode, _, _ := executeTaskCommandContext(ctx, slowTaskCommand())
+		result <- struct {
+			output   string
+			exitCode int
+		}{output: output, exitCode: exitCode}
+	}()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case got := <-result:
+		if got.exitCode == 0 || !strings.Contains(got.output, "agent is shutting down") {
+			t.Fatalf("canceled task result = (%d, %q)", got.exitCode, got.output)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("task ignored agent shutdown context")
+	}
+}
+
+func TestQueuedTaskSlotHonorsCancellation(t *testing.T) {
+	setTaskConcurrencyLimit(t, 1)
+	release := acquireTaskExecutionSlot()
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := acquireTaskExecutionSlotContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("acquireTaskExecutionSlotContext() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("queued slot cancellation exceeded bound: %s", elapsed)
 	}
 }
 

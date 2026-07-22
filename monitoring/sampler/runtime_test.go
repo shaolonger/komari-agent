@@ -108,6 +108,47 @@ func TestRuntimeTimeoutDoesNotBlockStop(t *testing.T) {
 	}
 }
 
+func TestStopContextBoundsIgnoringSamplerAndBlocksRestart(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	runtime, err := New([]Spec{{
+		Name:       "ignores-context",
+		Interval:   time.Hour,
+		Timeout:    time.Hour,
+		StaleAfter: time.Hour,
+		Sample: func(context.Context) (any, error) {
+			close(started)
+			<-release
+			return nil, nil
+		},
+	}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := runtime.StopContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StopContext() error = %v, want deadline exceeded", err)
+	}
+	if err := runtime.Start(context.Background()); err == nil {
+		t.Fatal("Start() succeeded while the previous generation was still stopping")
+	}
+	close(release)
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := runtime.StopContext(ctx); err != nil {
+		t.Fatalf("second StopContext() error = %v", err)
+	}
+	if err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() after joined stop error = %v", err)
+	}
+	runtime.Stop()
+}
+
 func TestErrorBackoffDoublesAndCaps(t *testing.T) {
 	clock := newFakeClock(time.Unix(1_700_000_000, 0))
 	attempts := make(chan struct{}, 8)

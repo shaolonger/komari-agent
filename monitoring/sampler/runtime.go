@@ -64,6 +64,8 @@ type Runtime struct {
 	parent     context.Context
 	cancel     context.CancelFunc
 	running    bool
+	stopping   bool
+	stopDone   chan struct{}
 	generation uint64
 	specs      []Spec
 	results    map[string]resultState
@@ -102,6 +104,10 @@ func (runtime *Runtime) Start(parent context.Context) error {
 	}
 
 	runtime.mu.Lock()
+	if runtime.stopping {
+		runtime.mu.Unlock()
+		return errors.New("sampler runtime is still stopping")
+	}
 	if runtime.running {
 		runtime.mu.Unlock()
 		return errors.New("sampler runtime is already running")
@@ -137,19 +143,55 @@ func (runtime *Runtime) Reload(specs []Spec) error {
 }
 
 func (runtime *Runtime) Stop() {
+	_ = runtime.StopContext(context.Background())
+}
+
+// StopContext cancels all generations and bounds the caller's wait. A timed
+// out stop remains in progress and Start rejects a new generation until every
+// old worker has actually exited, preventing WaitGroup Add/Wait races.
+func (runtime *Runtime) StopContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("sampler runtime stop requires a parent context")
+	}
 	runtime.mu.Lock()
-	if !runtime.running {
+	if !runtime.running && !runtime.stopping {
 		runtime.mu.Unlock()
-		return
+		return nil
+	}
+	if runtime.stopping {
+		done := runtime.stopDone
+		runtime.mu.Unlock()
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("stop sampler runtime: %w", ctx.Err())
+		}
 	}
 	runtime.running = false
+	runtime.stopping = true
+	runtime.stopDone = make(chan struct{})
+	done := runtime.stopDone
 	if runtime.cancel != nil {
 		runtime.cancel()
 	}
 	runtime.cancel = nil
 	runtime.parent = nil
 	runtime.mu.Unlock()
-	runtime.wg.Wait()
+
+	go func() {
+		runtime.wg.Wait()
+		runtime.mu.Lock()
+		runtime.stopping = false
+		close(done)
+		runtime.mu.Unlock()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("stop sampler runtime: %w", ctx.Err())
+	}
 }
 
 func (runtime *Runtime) Snapshot() Snapshot {

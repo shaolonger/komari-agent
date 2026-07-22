@@ -72,7 +72,6 @@ func RunTelemetryWebSocket(ctx context.Context) error {
 	if err := monitoring.StartReportSampler(ctx); err != nil {
 		return fmt.Errorf("start report sampler: %w", err)
 	}
-	defer monitoring.StopReportSampler()
 
 	endpoint := buildClientWebSocketEndpoint("/api/clients/report", nil)
 	if converted, err := utils.ConvertIDNToASCII(endpoint); err == nil {
@@ -81,7 +80,14 @@ func RunTelemetryWebSocket(ctx context.Context) error {
 		log.Printf("Warning: Failed to convert WebSocket IDN to ASCII: %v", err)
 	}
 	runner := newTelemetryRunner(endpoint)
-	return runner.Run(ctx)
+	runErr := runner.Run(ctx)
+	stopContext, cancelStop := context.WithTimeout(context.Background(), defaultTelemetryDrainTimeout)
+	defer cancelStop()
+	stopErr := monitoring.StopReportSamplerContext(stopContext)
+	if stopErr != nil {
+		return errors.Join(runErr, stopErr)
+	}
+	return runErr
 }
 
 func newTelemetryRunner(endpoint string) *telemetryRunner {
@@ -162,7 +168,7 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 		diagnostics.RecordWebSocketConnected()
 		queue.ResetEphemeral()
 		runner.generation.handleMessage = func(message []byte) {
-			handleWebSocketMessage(queue, message)
+			handleWebSocketMessageContext(ctx, queue, message)
 		}
 		err = runTelemetryGeneration(ctx, session, protocol, runner.generation)
 		diagnostics.RecordWebSocketDisconnected()

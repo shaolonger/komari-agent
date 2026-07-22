@@ -132,7 +132,7 @@
 
 ## Phase A4：生命周期、构建与发布
 
-- [ ] **A-401 配置参数验证和优雅关闭**
+- [x] **A-401 配置参数验证和优雅关闭**
   - interval、timeout、retry、queue、并发和持久化参数统一验证。
   - signal context 驱动停止，不调用 `os.Exit` 跳过 defer。
   - 有界等待 sampler、队列、netstatic 和连接关闭。

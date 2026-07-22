@@ -54,28 +54,51 @@ var taskExecutionSlots chan struct{}
 var taskExecutionSlotsLimit int
 
 func NewTask(task_id, command string) {
-	if task_id == "" {
+	newTaskWithContext(context.Background(), task_id, command, func(_ context.Context, taskID, result string, exitCode int, finishedAt time.Time) {
+		taskResultUploader(taskID, result, exitCode, finishedAt)
+	})
+}
+
+func NewTaskContext(ctx context.Context, taskID, command string) {
+	newTaskWithContext(ctx, taskID, command, uploadTaskResultContext)
+}
+
+func newTaskWithContext(
+	ctx context.Context,
+	taskID, command string,
+	upload func(context.Context, string, string, int, time.Time),
+) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if upload == nil {
+		return
+	}
+	if taskID == "" {
 		return
 	}
 	if command == "" {
-		taskResultUploader(task_id, "No command provided", 0, time.Now())
+		upload(ctx, taskID, "No command provided", 0, time.Now())
 		return
 	}
 	if !flags.RemoteExecEnabled() {
-		taskResultUploader(task_id, "Remote task execution is disabled.", -1, time.Now())
+		upload(ctx, taskID, "Remote task execution is disabled.", -1, time.Now())
 		return
 	}
-	releaseTaskSlot := acquireTaskExecutionSlot()
+	releaseTaskSlot, err := acquireTaskExecutionSlotContext(ctx)
+	if err != nil {
+		return
+	}
 	defer releaseTaskSlot()
 
 	startedAt := time.Now()
 	if flags.AuditTaskCommands {
-		log.Printf("Task audit task_id=%s command=%s", task_id, redactTaskCommand(command))
+		log.Printf("Task audit task_id=%s command=%s", taskID, redactTaskCommand(command))
 	}
-	log.Printf("Task started task_id=%s started_at=%s", task_id, startedAt.UTC().Format(time.RFC3339))
-	result, exitCode, outputBytes, finishedAt := executeTaskCommand(command)
-	log.Printf("Task finished task_id=%s finished_at=%s exit_code=%d output_bytes=%d", task_id, finishedAt.UTC().Format(time.RFC3339), exitCode, outputBytes)
-	taskResultUploader(task_id, result, exitCode, finishedAt)
+	log.Printf("Task started task_id=%s started_at=%s", taskID, startedAt.UTC().Format(time.RFC3339))
+	result, exitCode, outputBytes, finishedAt := executeTaskCommandContext(ctx, command)
+	log.Printf("Task finished task_id=%s finished_at=%s exit_code=%d output_bytes=%d", taskID, finishedAt.UTC().Format(time.RFC3339), exitCode, outputBytes)
+	upload(ctx, taskID, result, exitCode, finishedAt)
 }
 
 func redactTaskCommand(command string) string {
@@ -87,6 +110,11 @@ func redactTaskCommand(command string) string {
 }
 
 func acquireTaskExecutionSlot() func() {
+	release, _ := acquireTaskExecutionSlotContext(context.Background())
+	return release
+}
+
+func acquireTaskExecutionSlotContext(ctx context.Context) (func(), error) {
 	limit := taskConcurrencyLimit
 	if limit < 1 {
 		limit = 1
@@ -100,14 +128,20 @@ func acquireTaskExecutionSlot() func() {
 	slots := taskExecutionSlots
 	taskExecutionSlotsMu.Unlock()
 
-	slots <- struct{}{}
-	return func() {
-		<-slots
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
+	case <-ctx.Done():
+		return func() {}, ctx.Err()
 	}
 }
 
 func executeTaskCommand(command string) (string, int, int, time.Time) {
-	ctx, cancel := context.WithTimeout(context.Background(), taskExecutionTimeout)
+	return executeTaskCommandContext(context.Background(), command)
+}
+
+func executeTaskCommandContext(parent context.Context, command string) (string, int, int, time.Time) {
+	ctx, cancel := context.WithTimeout(parent, taskExecutionTimeout)
 	defer cancel()
 
 	cmd := newTaskCommand(ctx, command)
@@ -130,6 +164,9 @@ func executeTaskCommand(command string) (string, int, int, time.Time) {
 
 	var exitError *exec.ExitError
 	switch {
+	case errors.Is(parent.Err(), context.Canceled):
+		exitCode = -1
+		result = appendTaskOutput(result, "Task execution canceled because the agent is shutting down.")
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		exitCode = -1
 		result = appendTaskOutput(result, "Task execution timed out.")
@@ -214,6 +251,10 @@ func appendTaskOutput(result, addition string) string {
 }
 
 func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time) {
+	uploadTaskResultContext(context.Background(), taskID, result, exitCode, finishedAt)
+}
+
+func uploadTaskResultContext(ctx context.Context, taskID, result string, exitCode int, finishedAt time.Time) {
 	payload := map[string]interface{}{
 		"task_id":     taskID,
 		"result":      result,
@@ -238,13 +279,15 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 	for attempt := 0; attempt <= maxRetry; attempt++ {
 		if attempt > 0 {
 			log.Printf("Failed to upload task result, retrying %d/%d", attempt, maxRetry)
-			time.Sleep(2 * time.Second)
+			if !waitForContext(ctx, 2*time.Second) {
+				return
+			}
 			if resetErr := resetRequestBody(req); resetErr != nil {
 				log.Printf("Failed to reset task result request body: %v", resetErr)
 				return
 			}
 		}
-		timedRequest, cancel := requestWithTimeout(req, 30*time.Second)
+		timedRequest, cancel := requestWithTimeout(req.WithContext(ctx), 30*time.Second)
 		requestStarted := time.Now()
 		resp, err := client.Do(timedRequest)
 		diagnostics.ObserveHTTP(requestStarted, err)

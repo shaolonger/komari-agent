@@ -106,6 +106,36 @@ func configOrDefault(c NetStaticConfig) NetStaticConfig {
 	return c
 }
 
+func validateConfigUpdate(config NetStaticConfig) error {
+	for name, value := range map[string]float64{
+		"data_preserve_day": config.DataPreserveDay,
+		"detect_interval":   config.DetectInterval,
+		"save_interval":     config.SaveInterval,
+	} {
+		if value != 0 && !positiveFinite(value) {
+			return fmt.Errorf("netstatic %s must be finite and positive", name)
+		}
+	}
+	if config.DataPreserveDay > 3650 {
+		return errors.New("netstatic data_preserve_day must not exceed 3650 days")
+	}
+	if config.DetectInterval != 0 && (config.DetectInterval < 0.001 || config.DetectInterval > 24*60*60) {
+		return errors.New("netstatic detect_interval must be between 0.001 and 86400 seconds")
+	}
+	if config.SaveInterval != 0 && (config.SaveInterval < 0.001 || config.SaveInterval > 7*24*60*60) {
+		return errors.New("netstatic save_interval must be between 0.001 and 604800 seconds")
+	}
+	if len(config.Nics) > 1024 {
+		return errors.New("netstatic nics must contain at most 1024 entries")
+	}
+	for _, name := range config.Nics {
+		if name == "" || len(name) > 256 {
+			return errors.New("netstatic nic names must contain 1 to 256 bytes")
+		}
+	}
+	return nil
+}
+
 func positiveFinite(value float64) bool {
 	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
@@ -636,6 +666,25 @@ func Stop() error {
 	return writeSnapshot(path, snapshot)
 }
 
+// StopContext bounds lifecycle shutdown even if the underlying filesystem is
+// stalled. Stop continues in the background so an embedding process may still
+// allow the final atomic write to finish after its own deadline expires.
+func StopContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("netstatic stop requires a parent context")
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- Stop()
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("netstatic stop: %w", ctx.Err())
+	}
+}
+
 // GetNetStaticBetween returns the records in the inclusive time range.
 func GetNetStaticBetween(start, end uint64) (*NetStatic, error) {
 	mu.RLock()
@@ -678,6 +727,9 @@ func GetTotalTrafficBetween(start, end uint64) (map[string]TrafficData, error) {
 // SetNewConfig atomically replaces the worker generation when running. A
 // detached generation is always joined before a new generation can start.
 func SetNewConfig(newConfig NetStaticConfig) error {
+	if err := validateConfigUpdate(newConfig); err != nil {
+		return err
+	}
 	lifecycleMu.Lock()
 	defer lifecycleMu.Unlock()
 

@@ -436,3 +436,22 @@ Apple M4/macOS、31 天、8 网卡、每 10 分钟一桶（共 35,712 桶）benc
 - 阻塞磁盘写入期间查询仍可立即完成，证明 marshal/write 不持有数据锁；
 - 8 路并发 start 只创建一个 generation，reload/stop 返回前旧 worker 已 join；
 - 并发查询、快照读取和采样压力，以及专项 race、全量 unit/vet/race 回归。
+
+## A-401 配置参数验证和优雅关闭
+
+Agent 现在只在启动边界接受一份通过统一校验的外部配置。遥测 interval、重连、重试、基础信息周期、月重置日、Ping 并发/频率、控制请求窗口、终端并发/空闲/最长时限均有明确的最小值和硬上界；NaN/Inf、duration 溢出、无效 Ping type/port、异常 DNS 地址和超长 policy/list 会在创建 ticker、channel 或连接前直接拒绝。netstatic 的保留期、采样/保存周期和 NIC 列表也有独立边界。非法环境变量不再静默忽略，错误只包含变量名而不回显潜在敏感值；未知命令行参数不再被吞掉。
+
+配置文件限制为 1MiB、Token 文件限制为 64KiB，只接受 regular file，并在读取前检查文件大小、读取时再次使用 limit reader，避免特殊文件阻塞或输入炸弹。基础信息响应也限制为 64KiB。默认 capability 安全策略没有变化：远程执行、终端和 Ping 仍需显式启用，`ignore-unsafe-cert` 仍强制关闭控制能力和自动更新。
+
+进程只有 `main` 一个 `os.Exit` 出口。Cobra 根命令使用 `RunE` 返回错误；SIGINT/SIGTERM 只取消父 context，不会从信号 goroutine 跳过 defer。自动更新成功也不再由 update package 直接退出，而是返回可识别的 restart 请求：完成相同的关闭流程后由主出口返回兼容的 42；普通配置/运行/最终保存错误返回 1，正常信号关闭返回 0。
+
+关闭顺序由同一个 15 秒总预算约束：停止后台基础信息/更新/诊断 worker，取消 WebSocket generation 并在 5 秒内 drain 可靠队列，停止并 join sampler，取消远程 task/Ping/terminal，等待已接受的控制 worker，最后完成 netstatic 原子持久化。忽略 context 的 sampler、控制 worker 或阻塞文件系统不会让主关闭无限等待；旧 sampler generation 完全退出前不能重新 Start，避免 WaitGroup Add/Wait 竞态。
+
+正确性、安全和生命周期验证包括：
+
+- 默认值、全部上下界、NaN/Inf、非法 type/port/DNS、超长配置和 netstatic 参数矩阵；
+- malformed 环境变量脱敏、超限/非 regular 配置与 Token 文件、未知 flag 和真实二进制非法配置退出码 1；
+- 真实 Agent 二进制连接失败循环中接收 SIGINT，执行 shutdown/drain 并以 0 退出；Unix 测试直接发送 SIGTERM 并确认最终 netstatic stop；
+- 基础信息和更新 ticker 取消、自动更新完成返回 42 前不跳过清理；
+- 慢命令取消、等待执行 slot 取消、控制 worker deadline、忽略 context 的 sampler 和阻塞 netstatic 保存；
+- 最终保存错误传播、后台 worker join、总关闭 timeout、专项 race、全量 unit/vet/race 与四平台静态构建。

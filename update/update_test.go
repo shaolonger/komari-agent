@@ -27,11 +27,10 @@ func (s stubSelfUpdater) UpdateSelf(current semver.Version, slug string) (*selfu
 	return s.release, s.err
 }
 
-func useUpdateHooks(t *testing.T, updater selfUpdater, updateErr error, exitCode *int) {
+func useUpdateHooks(t *testing.T, updater selfUpdater, updateErr error) {
 	t.Helper()
 
 	previousUpdater := newSelfUpdater
-	previousExit := exitProcess
 	previousVersion := CurrentVersion
 
 	newSelfUpdater = func(context.Context, selfupdate.Config, *http.Client) (selfUpdater, error) {
@@ -40,14 +39,10 @@ func useUpdateHooks(t *testing.T, updater selfUpdater, updateErr error, exitCode
 		}
 		return updater, nil
 	}
-	exitProcess = func(code int) {
-		*exitCode = code
-	}
 	CurrentVersion = "1.0.0"
 
 	t.Cleanup(func() {
 		newSelfUpdater = previousUpdater
-		exitProcess = previousExit
 		CurrentVersion = previousVersion
 	})
 }
@@ -172,34 +167,25 @@ func TestSelfUpdateConfigUsesSHA2Validator(t *testing.T) {
 }
 
 func TestCheckAndUpdateSanitizesVersionParseFailure(t *testing.T) {
-	exitCode := 0
-	useUpdateHooks(t, stubSelfUpdater{}, nil, &exitCode)
+	useUpdateHooks(t, stubSelfUpdater{}, nil)
 	CurrentVersion = "invalid-version https://updates.example/?token=secret"
 	logs := captureUpdateLogs(t)
 
 	err := CheckAndUpdate()
 	assertSanitizedUpdateFailure(t, err, logs.String(), updateStageVersionParse, "token=secret")
-	if exitCode != 0 {
-		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
-	}
 }
 
 func TestCheckAndUpdateSanitizesUpdaterCreationError(t *testing.T) {
-	exitCode := 0
 	sensitive := "https://updates.example/download?token=secret"
-	useUpdateHooks(t, stubSelfUpdater{}, errors.New(sensitive), &exitCode)
+	useUpdateHooks(t, stubSelfUpdater{}, errors.New(sensitive))
 	logs := captureUpdateLogs(t)
 
 	err := CheckAndUpdate()
 	assertSanitizedUpdateFailure(t, err, logs.String(), updateStageUpdaterInit, sensitive)
-	if exitCode != 0 {
-		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
-	}
 }
 
 func TestCheckAndUpdateDoesNotExitOnUpdaterError(t *testing.T) {
-	exitCode := 0
-	useUpdateHooks(t, stubSelfUpdater{}, nil, &exitCode)
+	useUpdateHooks(t, stubSelfUpdater{}, nil)
 	logs := captureUpdateLogs(t)
 
 	updateFailure := errors.New("Failed validating asset content for https://updates.example/download?token=secret")
@@ -209,32 +195,24 @@ func TestCheckAndUpdateDoesNotExitOnUpdaterError(t *testing.T) {
 
 	err := CheckAndUpdate()
 	assertSanitizedUpdateFailure(t, err, logs.String(), updateStageExecution, "token=secret")
-	if exitCode != 0 {
-		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
-	}
 }
 
-func TestCheckAndUpdateExitsAfterSuccessfulUpdate(t *testing.T) {
-	exitCode := 0
+func TestCheckAndUpdateRequestsRestartAfterSuccessfulUpdate(t *testing.T) {
 	releaseVersion, err := semver.Parse("1.0.1")
 	if err != nil {
 		t.Fatalf("semver.Parse() error = %v", err)
 	}
 	useUpdateHooks(t, stubSelfUpdater{
 		release: &selfupdate.Release{Version: releaseVersion},
-	}, nil, &exitCode)
+	}, nil)
 
-	if err := CheckAndUpdate(); err != nil {
-		t.Fatalf("CheckAndUpdate() error = %v", err)
-	}
-	if exitCode != 42 {
-		t.Fatalf("exitProcess() code = %d, want %d", exitCode, 42)
+	if err := CheckAndUpdate(); !errors.Is(err, ErrUpdateInstalled) {
+		t.Fatalf("CheckAndUpdate() error = %v, want ErrUpdateInstalled", err)
 	}
 }
 
 func TestCheckAndUpdateUsesVerifiedHTTPClientWhenUnsafeCertsEnabled(t *testing.T) {
-	exitCode := 0
-	useUpdateHooks(t, stubSelfUpdater{}, nil, &exitCode)
+	useUpdateHooks(t, stubSelfUpdater{}, nil)
 
 	previousIgnoreUnsafeCert := flags_pkg.GlobalConfig.IgnoreUnsafeCert
 	previousDefaultClient := http.DefaultClient
@@ -278,8 +256,5 @@ func TestCheckAndUpdateUsesVerifiedHTTPClientWhenUnsafeCertsEnabled(t *testing.T
 	}
 	if http.DefaultClient != previousDefaultClient || http.DefaultTransport != previousDefaultTransport {
 		t.Fatal("auto-update modified a process-global HTTP object")
-	}
-	if exitCode != 0 {
-		t.Fatalf("exitProcess() called with %d, want not called", exitCode)
 	}
 }

@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -39,6 +40,13 @@ type terminalImpl struct {
 
 // StartTerminal 启动终端并处理 WebSocket 通信
 func StartTerminal(conn *websocket.Conn) {
+	StartTerminalContext(context.Background(), conn)
+}
+
+func StartTerminalContext(ctx context.Context, conn *websocket.Conn) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !terminalCapabilityEnabled() {
 		conn.WriteMessage(websocket.TextMessage, []byte("\n\nTerminal access is disabled. Enable it explicitly with --enable-terminal or --enable-remote-control if required."))
 		conn.Close()
@@ -83,6 +91,8 @@ func StartTerminal(conn *websocket.Conn) {
 	// 等待终端进程结束、会话超时或出现错误
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case err := <-errChan:
 			if err != nil {
 				conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nConnection error: %v\r\n", err)))

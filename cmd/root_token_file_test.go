@@ -71,3 +71,30 @@ func TestLoadTokenFromFileRejectsEmptyFile(t *testing.T) {
 		t.Fatal("loadTokenFromFile() error = nil, want non-nil")
 	}
 }
+
+func TestLoadTokenFromFileRejectsOversizedFile(t *testing.T) {
+	useGlobalFlagsSnapshot(t)
+	tokenPath := filepath.Join(t.TempDir(), "oversized.token")
+	file, err := os.Create(tokenPath)
+	if err != nil {
+		t.Fatalf("create token file: %v", err)
+	}
+	if err := file.Truncate(maximumTokenFileBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatalf("truncate token file: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close token file: %v", err)
+	}
+	flags.Token = ""
+	flags.TokenFile = tokenPath
+	if err := loadTokenFromFile(); err == nil {
+		t.Fatal("loadTokenFromFile() accepted oversized file")
+	}
+}
+
+func TestReadBoundedRegularFileRejectsDirectory(t *testing.T) {
+	if _, err := readBoundedRegularFile(t.TempDir(), maximumConfigFileBytes); err == nil {
+		t.Fatal("readBoundedRegularFile() accepted directory")
+	}
+}

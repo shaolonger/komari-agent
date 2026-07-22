@@ -89,6 +89,10 @@ func (engine *ReportEngine) Stop() {
 	engine.runtime.Stop()
 }
 
+func (engine *ReportEngine) StopContext(ctx context.Context) error {
+	return engine.runtime.StopContext(ctx)
+}
+
 func (engine *ReportEngine) Snapshot() ReportSnapshot {
 	return engine.store.snapshot()
 }
@@ -322,12 +326,17 @@ func StartReportSampler(ctx context.Context) error {
 }
 
 func StopReportSampler() {
+	_ = StopReportSamplerContext(context.Background())
+}
+
+func StopReportSamplerContext(ctx context.Context) error {
 	defaultReportEngineMu.Lock()
 	engine := defaultReportEngine.Swap(nil)
 	defaultReportEngineMu.Unlock()
 	if engine != nil {
-		engine.Stop()
+		return engine.StopContext(ctx)
 	}
+	return nil
 }
 
 func GenerateReport() []byte {

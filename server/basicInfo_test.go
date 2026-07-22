@@ -1,6 +1,11 @@
 package server
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
 
 func TestBuildCapabilityPayloadReflectsFlags(t *testing.T) {
 	original := *flags
@@ -71,5 +76,24 @@ func TestBuildCapabilityPayloadRespectsUnsafeCertRestrictions(t *testing.T) {
 		if got {
 			t.Fatalf("%s = true, want false when ignore_unsafe_cert is enabled", key)
 		}
+	}
+}
+
+func TestBasicInfoWorkerValidatesIntervalAndStopsWithContext(t *testing.T) {
+	original := flags.InfoReportInterval
+	t.Cleanup(func() { flags.InfoReportInterval = original })
+	flags.InfoReportInterval = 0
+	if err := DoUploadBasicInfoWorksContext(context.Background()); err == nil {
+		t.Fatal("worker accepted a zero interval")
+	}
+	flags.InfoReportInterval = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if err := DoUploadBasicInfoWorksContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("worker error = %v, want context canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("worker cancellation took %s", elapsed)
 	}
 }

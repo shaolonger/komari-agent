@@ -1,6 +1,7 @@
 package netstatic
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -300,6 +301,64 @@ func TestConcurrentQueriesAndMutations(t *testing.T) {
 		}(worker)
 	}
 	group.Wait()
+}
+
+func TestSetNewConfigRejectsInvalidPersistenceParameters(t *testing.T) {
+	resetNetstaticForTest(t)
+	for _, config := range []NetStaticConfig{
+		{DataPreserveDay: -1},
+		{DetectInterval: -1},
+		{DetectInterval: 0.0001},
+		{SaveInterval: -1},
+		{SaveInterval: 8 * 24 * 60 * 60},
+		{Nics: []string{""}},
+	} {
+		if err := SetNewConfig(config); err == nil {
+			t.Fatalf("SetNewConfig(%+v) unexpectedly succeeded", config)
+		}
+	}
+}
+
+func TestStopContextIsBoundedWhenPersistenceStalls(t *testing.T) {
+	resetNetstaticForTest(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	writeSnapshot = func(string, NetStatic) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	mu.Lock()
+	config = NetStaticConfig{DataPreserveDay: 31, DetectInterval: 60, SaveInterval: 60}
+	store.Config = config
+	mu.Unlock()
+	if err := StartOrContinue(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := StopContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StopContext() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("StopContext exceeded bound: %s", elapsed)
+	}
+	select {
+	case <-entered:
+	default:
+		t.Fatal("final persistence did not start")
+	}
+	close(release)
+	waitFor(t, time.Second, func() bool {
+		if !lifecycleMu.TryLock() {
+			return false
+		}
+		lifecycleMu.Unlock()
+		return true
+	})
 }
 
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {

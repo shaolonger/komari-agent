@@ -133,6 +133,13 @@ func buildTelemetryFrameWith(
 }
 
 func handleWebSocketMessage(resultWriter pingResultWriter, messageRaw []byte) {
+	handleWebSocketMessageContext(context.Background(), resultWriter, messageRaw)
+}
+
+func handleWebSocketMessageContext(ctx context.Context, resultWriter pingResultWriter, messageRaw []byte) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var message controlPlaneMessage
 	if err := json.Unmarshal(messageRaw, &message); err != nil {
 		log.Println("Bad ws message:", err)
@@ -141,20 +148,24 @@ func handleWebSocketMessage(resultWriter pingResultWriter, messageRaw []byte) {
 	if shouldRateLimitControlRequest(message) && !allowControlRequest(time.Now()) {
 		log.Printf("Remote control request rejected due to rate limiting: message=%s", message.Message)
 		if message.Message == "exec" && message.ExecTaskID != "" {
-			taskResultUploader(message.ExecTaskID, "Remote control request rejected due to rate limiting.", -1, time.Now())
+			activeControlWorkers.launch(func() {
+				uploadTaskResultContext(ctx, message.ExecTaskID, "Remote control request rejected due to rate limiting.", -1, time.Now())
+			})
 		}
 		return
 	}
 	if isTerminalControlMessage(message) {
-		go establishTerminalConnection(message.TerminalId)
+		activeControlWorkers.launch(func() { establishTerminalConnectionContext(ctx, message.TerminalId) })
 		return
 	}
 	if isExecControlMessage(message) {
-		go NewTask(message.ExecTaskID, message.ExecCommand)
+		activeControlWorkers.launch(func() { NewTaskContext(ctx, message.ExecTaskID, message.ExecCommand) })
 		return
 	}
 	if isPingControlMessage(message) {
-		go NewPingTask(resultWriter, message.PingTaskID, message.PingType, message.PingTarget)
+		activeControlWorkers.launch(func() {
+			NewPingTaskContext(ctx, resultWriter, message.PingTaskID, message.PingType, message.PingTarget)
+		})
 	}
 }
 
@@ -162,6 +173,10 @@ func handleWebSocketMessage(resultWriter pingResultWriter, messageRaw []byte) {
 
 // establishTerminalConnection 建立终端连接并使用terminal包处理终端操作
 func establishTerminalConnection(id string) {
+	establishTerminalConnectionContext(context.Background(), id)
+}
+
+func establishTerminalConnectionContext(ctx context.Context, id string) {
 	endpoint := buildClientWebSocketEndpoint("/api/clients/terminal", url.Values{"id": []string{id}})
 
 	// 转换中文域名为 ASCII 兼容编码
@@ -176,14 +191,14 @@ func establishTerminalConnection(id string) {
 
 	headers := newWSHeaders()
 
-	conn, _, err := dialer.Dial(endpoint, headers)
+	conn, _, err := dialer.DialContext(ctx, endpoint, headers)
 	if err != nil {
 		log.Println("Failed to establish terminal connection:", err)
 		return
 	}
 
 	// 启动终端
-	terminal.StartTerminal(conn)
+	terminal.StartTerminalContext(ctx, conn)
 	if conn != nil {
 		conn.Close()
 	}

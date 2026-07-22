@@ -88,4 +88,11 @@ var GlobalConfig = &Config{
 	PingMinIntervalMillis: 500,
 	MaxControlRequests:    10,
 	ControlRequestWindow:  10,
+	Interval:              1,
+	MaxRetries:            3,
+	ReconnectInterval:     5,
+	InfoReportInterval:    5,
+	MaxTerminalSessions:   1,
+	TerminalIdleTimeout:   300,
+	TerminalMaxDuration:   1800,
 }

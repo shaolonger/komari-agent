@@ -841,6 +841,13 @@ func measurePingWithRetries(
 }
 
 func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string) {
+	NewPingTaskContext(context.Background(), conn, taskID, pingType, pingTarget)
+}
+
+func NewPingTaskContext(parent context.Context, conn pingResultWriter, taskID uint, pingType, pingTarget string) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	pingStarted := time.Now()
 	if taskID == 0 {
 		log.Printf("Invalid task ID: %d", taskID)
@@ -875,7 +882,7 @@ func NewPingTask(conn pingResultWriter, taskID uint, pingType, pingTarget string
 		diagnostics.RecordPingRejected()
 		return
 	}
-	taskContext, cancelTask := context.WithTimeout(context.Background(), pingTaskTimeout)
+	taskContext, cancelTask := context.WithTimeout(parent, pingTaskTimeout)
 	defer cancelTask()
 	resolveContext, cancelResolve := context.WithTimeout(taskContext, pingResolutionTimeout)
 	resolved, err := resolvePingTarget(resolveContext, policy, definition, dnsresolver.GetCustomResolver())

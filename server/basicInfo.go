@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -57,34 +59,66 @@ func buildBasicInfoPayload() map[string]interface{} {
 }
 
 func DoUploadBasicInfoWorks() {
-	ticker := time.NewTicker(time.Duration(flags.InfoReportInterval) * time.Minute)
-	for range ticker.C {
-		err := uploadBasicInfo()
-		if err != nil {
-			log.Println("Error uploading basic info:", err)
+	_ = DoUploadBasicInfoWorksContext(context.Background())
+}
+
+func DoUploadBasicInfoWorksContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("basic info worker requires a parent context")
+	}
+	interval := time.Duration(flags.InfoReportInterval) * time.Minute
+	if interval <= 0 {
+		return errors.New("basic info interval must be positive")
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := uploadBasicInfoContext(ctx); err != nil && ctx.Err() == nil {
+				log.Println("Error uploading basic info:", err)
+			}
 		}
 	}
 }
+
 func UpdateBasicInfo() {
-	err := uploadBasicInfo()
+	err := UpdateBasicInfoContext(context.Background())
 	if err != nil {
 		log.Println("Error uploading basic info:", err)
 	} else {
 		log.Println("Basic info uploaded successfully")
 	}
 }
+
+func UpdateBasicInfoContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("basic info update requires a parent context")
+	}
+	return uploadBasicInfoContext(ctx)
+}
+
 func uploadBasicInfo() error {
+	return uploadBasicInfoContext(context.Background())
+}
+
+func uploadBasicInfoContext(ctx context.Context) error {
 	data := buildBasicInfoPayload()
 
 	// 尝试上传完整数据
-	err := tryUploadData(data)
+	err := tryUploadDataContext(ctx, data)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		// 兼容 <= 1.0.2
 		delete(data, "kernel_version")
 		for key := range buildCapabilityPayload() {
 			delete(data, key)
 		}
-		err = tryUploadData(data)
+		err = tryUploadDataContext(ctx, data)
 		if err != nil {
 			return err
 		}
@@ -93,6 +127,13 @@ func uploadBasicInfo() error {
 }
 
 func tryUploadData(data map[string]interface{}) error {
+	return tryUploadDataContext(context.Background(), data)
+}
+
+func tryUploadDataContext(ctx context.Context, data map[string]interface{}) error {
+	if ctx == nil {
+		return errors.New("basic info upload requires a parent context")
+	}
 	endpoint := buildClientAPIEndpoint("/api/clients/uploadBasicInfo", nil)
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -105,6 +146,7 @@ func tryUploadData(data map[string]interface{}) error {
 	}
 
 	client := newTelemetryHTTPClient()
+	req = req.WithContext(ctx)
 	req, cancel := requestWithTimeout(req, 30*time.Second)
 	defer cancel()
 
@@ -116,9 +158,12 @@ func tryUploadData(data map[string]interface{}) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
 	if err != nil {
 		return err
+	}
+	if len(body) > 64*1024 {
+		return errors.New("basic info response exceeds 64 KiB")
 	}
 	message := string(body)
 
