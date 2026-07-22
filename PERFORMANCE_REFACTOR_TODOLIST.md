@@ -39,7 +39,7 @@
 
 ## Phase A1：Sampler Runtime 与报告快照
 
-- [ ] **A-101 Context、多频率、抖动和 stale 感知的 Sampler Runtime**
+- [x] **A-101 Context、多频率、抖动和 stale 感知的 Sampler Runtime**
   - 统一 sampler 生命周期、timeout、interval、backoff 和 generation。
   - 慢 sampler 不阻塞报告或其他 sampler。
   - 测试：fake clock、取消、超时、stale、reload、goroutine 泄漏、race、benchmark。
