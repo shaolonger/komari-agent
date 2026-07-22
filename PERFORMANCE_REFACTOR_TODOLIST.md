@@ -54,7 +54,7 @@
   - CPU 型号、核心、OS、kernel、虚拟化只在启动/事件刷新。
   - 测试：Linux fixture、平台 fallback、缓存刷新、错误 stale、benchmark。
 
-- [ ] **A-104 磁盘拓扑缓存和低频容量采样**
+- [x] **A-104 磁盘拓扑缓存和低频容量采样**
   - 分区拓扑与容量读取解耦。
   - include mountpoints 预解析，处理 ZFS、重复设备和挂载变化。
   - 测试：复杂挂载 fixture、热插拔、错误挂载、刷新、benchmark。

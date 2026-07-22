@@ -61,3 +61,36 @@ Apple M4/macOS 热路径结果：
 - RAM/Swap 由同一 Linux fixture 计算，`includeCache` 与 htop-like 语义保持；
 - 异常大计数器不会整数下溢/溢出，也不会报告 `used > total`；
 - basic-info 和周期 report 复用同一静态缓存与内存快照。
+
+## A-104 磁盘拓扑缓存和低频容量采样
+
+磁盘采样现在把“分区拓扑发现”和“容量查询”拆为两个独立周期：默认每 5 分钟刷新挂载拓扑、每 30 秒刷新容量。报告热路径只读取带锁快照；配置或挂载事件可调用 `RefreshDiskTopology` 立即刷新。自定义 mountpoint 在配置进入采样器时完成去空白和去重，不再枚举全部分区。
+
+验证命令：
+
+```sh
+go test ./monitoring/unit ./monitoring \
+  -run '^$' \
+  -bench 'Benchmark(Disk|DiskTopologyAndUsageRefresh|GenerateReport)$' \
+  -benchtime=100x -benchmem -count=5
+```
+
+Apple M4/macOS 结果：
+
+| Benchmark | 修改前 | A-104 后 | 结果 |
+|---|---:|---:|---:|
+| Disk 热路径 | 155,208 ns/op，90,344 B，270 allocs | 78～80 ns/op，0 B，0 alloc | 约 1,940～1,990× 更快，删除每报告分区枚举 |
+| 4 mount fixture 强制拓扑+容量刷新 | 无 | 1.57～1.80µs，约 1.66KB，27 allocs | 刷新成本独立且有界 |
+| GenerateReport allocations | 1,123～1,134 allocs/op | 857～863 allocs/op | 在 A-103 基础上再减少约 24% |
+
+GenerateReport 仍约 94.5～95.7ms；磁盘已经不再是报告热路径的平台调用，剩余主要耗时是 socket/process 枚举。
+
+正确性验证包括：
+
+- 复杂 mount fixture 过滤 tmpfs、NFS、loop 与容器临时挂载；
+- 重复设备与 ZFS pool 分组，容量选取最大可见 dataset，避免 quota 重复统计；
+- 自定义 mountpoint 预解析、去重且完全绕过分区枚举；
+- fake clock 验证 30 秒容量周期、5 分钟拓扑周期和时钟回拨；
+- 热插拔强制刷新、拓扑失败退避、单 mount 失败保留该组最后有效值；
+- 32 路并发冷启动只有一次拓扑/容量 source pass；
+- 超大平台计数器采用饱和加法，保证 `used <= total`。

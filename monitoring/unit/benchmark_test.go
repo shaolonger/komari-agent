@@ -3,6 +3,9 @@ package monitoring
 import (
 	"bytes"
 	"testing"
+	"time"
+
+	"github.com/shirou/gopsutil/v4/disk"
 )
 
 var (
@@ -60,9 +63,33 @@ func BenchmarkStaticHostInfoCached(b *testing.B) {
 }
 
 func BenchmarkDisk(b *testing.B) {
+	benchmarkDisk = Disk()
 	b.ReportAllocs()
+	b.ResetTimer()
 	for range b.N {
 		benchmarkDisk = Disk()
+	}
+}
+
+func BenchmarkDiskTopologyAndUsageRefresh(b *testing.B) {
+	parts := []disk.PartitionStat{
+		{Device: "/dev/root", Mountpoint: "/", Fstype: "ext4"},
+		{Device: "/dev/data", Mountpoint: "/data", Fstype: "xfs"},
+		{Device: "pool/root", Mountpoint: "/tank", Fstype: "zfs"},
+		{Device: "pool/dataset", Mountpoint: "/tank/dataset", Fstype: "zfs"},
+	}
+	sampler := newDiskSampler(
+		func(bool) ([]disk.PartitionStat, error) { return parts, nil },
+		func(string) (*disk.UsageStat, error) {
+			return &disk.UsageStat{Total: 1 << 40, Used: 1 << 39}, nil
+		},
+		time.Now,
+		time.Hour,
+		time.Hour,
+	)
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkDisk, _ = sampler.Sample("", true, true)
 	}
 }
 
