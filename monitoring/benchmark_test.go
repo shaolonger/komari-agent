@@ -37,6 +37,14 @@ func BenchmarkEncodeReportV1(b *testing.B) {
 	}
 }
 
+func BenchmarkEncodeReportV2(b *testing.B) {
+	snapshot := benchmarkReportSnapshot()
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkEncodedReport, _ = encodeReportV2(snapshot)
+	}
+}
+
 func benchmarkReportSnapshot() *ReportSnapshot {
 	return &ReportSnapshot{
 		Connections: ConnectionsReport{TCP: 128, UDP: 16},

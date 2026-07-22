@@ -15,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari-agent/diagnostics"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
+	"github.com/komari-monitor/komari-agent/protocol/telemetryv2"
 	"github.com/komari-monitor/komari-agent/terminal"
 	"github.com/komari-monitor/komari-agent/utils"
 	"github.com/komari-monitor/komari-agent/ws"
@@ -108,6 +109,7 @@ func EstablishWebSocketConnection() {
 	}
 
 	var conn *ws.SafeConn
+	wireProtocol := telemetryProtocolV1
 	defer func() {
 		if conn != nil {
 			conn.Close()
@@ -137,7 +139,7 @@ func EstablishWebSocketConnection() {
 					if retry > 0 {
 						log.Println("Retrying websocket connection, attempt:", retry)
 					}
-					conn, err = connectWebSocket(websocketEndpoint)
+					conn, wireProtocol, err = connectWebSocket(websocketEndpoint)
 					if err == nil {
 						log.Println("WebSocket connected")
 						diagnostics.RecordWebSocketConnected()
@@ -156,8 +158,11 @@ func EstablishWebSocketConnection() {
 				}
 			}
 
-			data := monitoring.GenerateReport()
-			err = conn.WriteMessage(websocket.TextMessage, data)
+			messageType, data, frameErr := buildTelemetryFrame(wireProtocol)
+			if frameErr != nil {
+				log.Printf("Telemetry v2 encoding failed; sent JSON v1 fallback: %v", frameErr)
+			}
+			err = conn.WriteMessage(messageType, data)
 			if err != nil {
 				log.Println("Failed to send WebSocket message:", err)
 				conn.Close()
@@ -180,20 +185,60 @@ func EstablishWebSocketConnection() {
 	}
 }
 
-func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
-	dialer := newWSDialer()
+type telemetryProtocol uint8
+
+const (
+	telemetryProtocolV1 telemetryProtocol = iota + 1
+	telemetryProtocolV2
+)
+
+func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, telemetryProtocol, error) {
+	dialer := newTelemetryWSDialer()
 
 	headers := newWSHeaders()
 
 	conn, resp, err := dialer.Dial(websocketEndpoint, headers)
 	if err != nil {
 		if resp != nil && resp.StatusCode != 101 {
-			return nil, fmt.Errorf("%s", resp.Status)
+			return nil, telemetryProtocolV1, fmt.Errorf("%s", resp.Status)
 		}
-		return nil, err
+		return nil, telemetryProtocolV1, err
 	}
+	protocol, err := negotiatedTelemetryProtocol(conn.Subprotocol())
+	if err != nil {
+		_ = conn.Close()
+		return nil, telemetryProtocolV1, err
+	}
+	return ws.NewSafeConn(conn), protocol, nil
+}
 
-	return ws.NewSafeConn(conn), nil
+func negotiatedTelemetryProtocol(selected string) (telemetryProtocol, error) {
+	switch selected {
+	case "", telemetryv2.LegacySubprotocol:
+		return telemetryProtocolV1, nil
+	case telemetryv2.Subprotocol:
+		return telemetryProtocolV2, nil
+	default:
+		return telemetryProtocolV1, fmt.Errorf("server selected unsupported telemetry subprotocol %q", selected)
+	}
+}
+
+func buildTelemetryFrame(protocol telemetryProtocol) (messageType int, payload []byte, encodeErr error) {
+	return buildTelemetryFrameWith(protocol, monitoring.GenerateReport, monitoring.GenerateReportV2)
+}
+
+func buildTelemetryFrameWith(
+	protocol telemetryProtocol,
+	generateV1 func() []byte,
+	generateV2 func() ([]byte, error),
+) (messageType int, payload []byte, encodeErr error) {
+	if protocol == telemetryProtocolV2 {
+		payload, encodeErr = generateV2()
+		if encodeErr == nil {
+			return websocket.BinaryMessage, payload, nil
+		}
+	}
+	return websocket.TextMessage, generateV1(), encodeErr
 }
 
 func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
@@ -278,6 +323,12 @@ func newWSDialer() *websocket.Dialer {
 		d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return d
+}
+
+func newTelemetryWSDialer() *websocket.Dialer {
+	dialer := newWSDialer()
+	dialer.Subprotocols = []string{telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
+	return dialer
 }
 
 // newWSHeaders 统一构造 WS 请求头（含 Cloudflare Access 头）

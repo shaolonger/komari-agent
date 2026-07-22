@@ -159,3 +159,31 @@ Apple M4/macOS 稳态结果：
 - 并发 publish/encode 的 race 回归；
 - fake platform sources 采样完成后连续编码 1,000 次，source 调用数严格不变；
 - 全量 unit、vet、race 与 Linux/Windows/FreeBSD 静态构建。
+
+## A-107 Agent 协议 v2 与 v1 安全回退
+
+Agent 现在按标准 WebSocket subprotocol 依次声明 `komari.telemetry.v2`、`komari.telemetry.v1`。服务端选择 v2 时发送 binary frame；旧服务端没有选择、显式选择 v1 或代理剥离协商头时继续发送原 JSON text frame。未知选择直接中止连接；任意 v2 编码错误都会在同一发送周期回退 JSON v1 text，不会丢失遥测。
+
+v2 使用固定 schema：16-byte `KMR2` header、version、flags、精确 payload length、schema ID 和 little-endian typed payload。最大帧 64KB、message 4KB、GPU 64 个、名称 256 UTF-8 bytes。encoder/decoder 拒绝未知版本/flag/schema、截断/尾随、非法 UTF-8、NaN/Inf、负/溢出计数和 `used > total`。完整 schema：[`protocol/telemetryv2/SCHEMA.md`](protocol/telemetryv2/SCHEMA.md)。
+
+跨仓库 golden：[`protocol/telemetryv2/testdata/report_v2.hex`](protocol/telemetryv2/testdata/report_v2.hex)，与 Komari 服务端同路径 fixture 逐字节一致；双方分别编码/解码并验证 v1/v2 字段一致。
+
+Apple M4/macOS、100,000 次稳态 benchmark：
+
+| Encoder | 帧大小 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|---:|
+| JSON v1（无 GPU） | 366 B | 607～844 | 1,313 | 3 |
+| Binary v2（无 GPU） | 150 B | 66～72 | 288 | 2 |
+| Binary v2 protocol detailed fixture | 199 B | 52～78 | 256 | 1 |
+
+无 GPU v2 帧缩小约 59%，编码约快 8.4～12.8×，分配字节减少约 78%。协议 detailed fixture decoder 约 104～121ns、118 B、4 allocs；Komari 端完成 `common.Report` 转换约 178～191ns。
+
+正确性和安全验证包括：
+
+- v1/v2 全字段一致、detailed GPU 与 models fallback round trip；
+- 无协商/v1/v2/未知 subprotocol 的降级和 fail-closed；
+- terminal/generic WebSocket dialer 不携带 telemetry subprotocol；
+- v2 binary、v1 text 和 v2 编码失败 text fallback 的消息类型；
+- 全部截断前缀、header 字段破坏、尾随/超限数据和 fuzz seed；
+- frame/string/GPU/整数/浮点边界；
+- Komari 服务端 K-104 的 full unit/vet/race 与 cross-repo fixture 验收。

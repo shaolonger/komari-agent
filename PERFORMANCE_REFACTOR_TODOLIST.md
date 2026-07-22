@@ -70,7 +70,7 @@
   - JSON v1 golden 完全兼容，复用有界 buffer。
   - 测试：golden、并发不可变性、空/陈旧字段、race、benchmark。
 
-- [ ] **A-107 Agent 协议 v2 与 v1 安全回退（Agent 部分）**
+- [x] **A-107 Agent 协议 v2 与 v1 安全回退（Agent 部分）**
   - 有 schema、最大帧长的二进制遥测。
   - 通过服务端能力协商，失败回到 JSON v1。
   - 测试：跨仓库 fixture、版本降级、畸形/超限帧、字段一致性、benchmark。
