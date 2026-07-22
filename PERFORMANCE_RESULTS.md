@@ -187,3 +187,28 @@ Apple M4/macOS、100,000 次稳态 benchmark：
 - 全部截断前缀、header 字段破坏、尾随/超限数据和 fuzz seed；
 - frame/string/GPU/整数/浮点边界；
 - Komari 服务端 K-104 的 full unit/vet/race 与 cross-repo fixture 验收。
+
+## A-201 Context 驱动的 WebSocket 状态机
+
+主 WebSocket 已从 ticker 内嵌套重试循环改为 context 驱动的 connection generation：启动后立即拨号并立即发送第一份快照；reader、telemetry writer 和 heartbeat worker 共享同一个 generation context，任一读写错误都会取消其余 worker、关闭该连接并等待全部 worker 退出后再创建下一代。
+
+连接失败采用指数上限 + full jitter；已连接后的第一次读失败立即重连。若服务端反复 accept 后立即 close，则第二次短连接起进入 full-jitter 退避，避免形成无上限热循环。拨号和退避均服从 parent context，不再使用不可取消的 `time.Sleep`。
+
+连接边界：
+
+- 控制帧 read limit 64KB；非 text 控制消息 fail closed；
+- heartbeat 30 秒，read/pong deadline 75 秒；每次 Pong 原子延长 deadline；
+- 所有报告和 Ping 写入设置 10 秒 write deadline；
+- 关闭直接中断 Gorilla read/write，generation 返回前 join 三个 worker；
+- telemetry v2/v1 协商、JSON fallback 与控制能力鉴权语义保持。
+
+相对旧实现，首次连接不再等待第一个 1 秒 data ticker；reader 退出也不再等下一个发送 tick 才发现断线。测试覆盖：
+
+- 首份报告立即发送、读失败即时取消全部 worker；
+- heartbeat、parent cancel 和 50 次重复 generation join/leak 回归；
+- 慢写被 deadline 有界终止；
+- 64KB read limit、binary 控制帧拒绝；
+- accept/close 多 generation 隔离和旧连接单次关闭；
+- 连接失败指数 cap、full-jitter 范围、retry 上限和重复短连接退避；
+- 真实本地 WebSocket 的 half-open 无 Pong 超时，以及正常 Pong 连续延长 read deadline；
+- 专项测试重复运行与 `-race`。

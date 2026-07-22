@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari-agent/diagnostics"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
 	"github.com/komari-monitor/komari-agent/protocol/telemetryv2"
@@ -93,95 +92,8 @@ func shouldRateLimitControlRequest(message controlPlaneMessage) bool {
 }
 
 func EstablishWebSocketConnection() {
-	if err := monitoring.StartReportSampler(context.Background()); err != nil {
-		log.Printf("Failed to start report sampler: %v", err)
-		return
-	}
-	defer monitoring.StopReportSampler()
-
-	websocketEndpoint := buildClientWebSocketEndpoint("/api/clients/report", nil)
-
-	// 转换中文域名为 ASCII 兼容编码
-	if convertedEndpoint, err := utils.ConvertIDNToASCII(websocketEndpoint); err == nil {
-		websocketEndpoint = convertedEndpoint
-	} else {
-		log.Printf("Warning: Failed to convert WebSocket IDN to ASCII: %v", err)
-	}
-
-	var conn *ws.SafeConn
-	wireProtocol := telemetryProtocolV1
-	defer func() {
-		if conn != nil {
-			conn.Close()
-		}
-	}()
-	var err error
-	var interval float64
-	if flags.Interval <= 1 {
-		interval = 1
-	} else {
-		interval = flags.Interval - 1
-	}
-
-	dataTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
-	defer dataTicker.Stop()
-
-	heartbeatTicker := time.NewTicker(30 * time.Second)
-	defer heartbeatTicker.Stop()
-
-	for {
-		select {
-		case <-dataTicker.C:
-			if conn == nil {
-				log.Println("Attempting to connect to WebSocket...")
-				retry := 0
-				for retry <= flags.MaxRetries {
-					if retry > 0 {
-						log.Println("Retrying websocket connection, attempt:", retry)
-					}
-					conn, wireProtocol, err = connectWebSocket(websocketEndpoint)
-					if err == nil {
-						log.Println("WebSocket connected")
-						diagnostics.RecordWebSocketConnected()
-						go handleWebSocketMessages(conn, make(chan struct{}))
-						break
-					} else {
-						log.Println("Failed to connect to WebSocket:", err)
-					}
-					retry++
-					time.Sleep(time.Duration(flags.ReconnectInterval) * time.Second)
-				}
-
-				if retry > flags.MaxRetries {
-					log.Println("Max retries reached.")
-					return
-				}
-			}
-
-			messageType, data, frameErr := buildTelemetryFrame(wireProtocol)
-			if frameErr != nil {
-				log.Printf("Telemetry v2 encoding failed; sent JSON v1 fallback: %v", frameErr)
-			}
-			err = conn.WriteMessage(messageType, data)
-			if err != nil {
-				log.Println("Failed to send WebSocket message:", err)
-				conn.Close()
-				conn = nil // Mark connection as dead
-				diagnostics.RecordWebSocketDisconnected()
-				continue
-			}
-			diagnostics.RecordWebSocketMessageSent()
-		case <-heartbeatTicker.C:
-			if conn != nil {
-				err := conn.WriteMessage(websocket.PingMessage, nil)
-				if err != nil {
-					log.Println("Failed to send heartbeat:", err)
-					conn.Close()
-					conn = nil // Mark connection as dead
-					diagnostics.RecordWebSocketDisconnected()
-				}
-			}
-		}
+	if err := RunTelemetryWebSocket(context.Background()); err != nil {
+		log.Printf("Telemetry WebSocket stopped: %v", err)
 	}
 }
 
@@ -191,26 +103,6 @@ const (
 	telemetryProtocolV1 telemetryProtocol = iota + 1
 	telemetryProtocolV2
 )
-
-func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, telemetryProtocol, error) {
-	dialer := newTelemetryWSDialer()
-
-	headers := newWSHeaders()
-
-	conn, resp, err := dialer.Dial(websocketEndpoint, headers)
-	if err != nil {
-		if resp != nil && resp.StatusCode != 101 {
-			return nil, telemetryProtocolV1, fmt.Errorf("%s", resp.Status)
-		}
-		return nil, telemetryProtocolV1, err
-	}
-	protocol, err := negotiatedTelemetryProtocol(conn.Subprotocol())
-	if err != nil {
-		_ = conn.Close()
-		return nil, telemetryProtocolV1, err
-	}
-	return ws.NewSafeConn(conn), protocol, nil
-}
 
 func negotiatedTelemetryProtocol(selected string) (telemetryProtocol, error) {
 	switch selected {
@@ -241,43 +133,29 @@ func buildTelemetryFrameWith(
 	return websocket.TextMessage, generateV1(), encodeErr
 }
 
-func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
-	defer close(done)
-	for {
-		_, message_raw, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("WebSocket read error:", err)
-			return
+func handleWebSocketMessage(conn *ws.SafeConn, messageRaw []byte) {
+	var message controlPlaneMessage
+	if err := json.Unmarshal(messageRaw, &message); err != nil {
+		log.Println("Bad ws message:", err)
+		return
+	}
+	if shouldRateLimitControlRequest(message) && !allowControlRequest(time.Now()) {
+		log.Printf("Remote control request rejected due to rate limiting: message=%s", message.Message)
+		if message.Message == "exec" && message.ExecTaskID != "" {
+			taskResultUploader(message.ExecTaskID, "Remote control request rejected due to rate limiting.", -1, time.Now())
 		}
-		diagnostics.RecordWebSocketMessageRead()
-		var message controlPlaneMessage
-		err = json.Unmarshal(message_raw, &message)
-		if err != nil {
-			log.Println("Bad ws message:", err)
-			continue
-		}
-		if shouldRateLimitControlRequest(message) {
-			if !allowControlRequest(time.Now()) {
-				log.Printf("Remote control request rejected due to rate limiting: message=%s", message.Message)
-				if message.Message == "exec" && message.ExecTaskID != "" {
-					taskResultUploader(message.ExecTaskID, "Remote control request rejected due to rate limiting.", -1, time.Now())
-				}
-				continue
-			}
-		}
-
-		if isTerminalControlMessage(message) {
-			go establishTerminalConnection(message.TerminalId)
-			continue
-		}
-		if isExecControlMessage(message) {
-			go NewTask(message.ExecTaskID, message.ExecCommand)
-			continue
-		}
-		if isPingControlMessage(message) {
-			go NewPingTask(conn, message.PingTaskID, message.PingType, message.PingTarget)
-			continue
-		}
+		return
+	}
+	if isTerminalControlMessage(message) {
+		go establishTerminalConnection(message.TerminalId)
+		return
+	}
+	if isExecControlMessage(message) {
+		go NewTask(message.ExecTaskID, message.ExecCommand)
+		return
+	}
+	if isPingControlMessage(message) {
+		go NewPingTask(conn, message.PingTaskID, message.PingType, message.PingTarget)
 	}
 }
 

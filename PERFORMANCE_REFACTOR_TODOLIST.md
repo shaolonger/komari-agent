@@ -77,7 +77,7 @@
 
 ## Phase A2：连接、HTTP 与 DNS
 
-- [ ] **A-201 Context 驱动的 WebSocket 状态机**
+- [x] **A-201 Context 驱动的 WebSocket 状态机**
   - 启动立即连接，reader/writer/heartbeat 同 generation。
   - 指数退避 + full jitter，读失败立即触发重连。
   - read limit、write deadline、pong deadline。
