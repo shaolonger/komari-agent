@@ -25,8 +25,8 @@ type reportSources struct {
 	connections func() (int, int, error)
 	uptime      func() (uint64, error)
 	process     func() int
-	gpu         func() ([]unit.DetailedGPUInfo, error)
-	gpuModels   func() ([]string, error)
+	gpu         func(context.Context) ([]unit.DetailedGPUInfo, error)
+	gpuModels   func(context.Context) ([]string, error)
 }
 
 func defaultReportSources() reportSources {
@@ -39,8 +39,8 @@ func defaultReportSources() reportSources {
 		connections: unit.ConnectionsCount,
 		uptime:      unit.Uptime,
 		process:     unit.ProcessCount,
-		gpu:         unit.GetDetailedGPUInfo,
-		gpuModels:   unit.GetDetailedGPUHost,
+		gpu:         unit.GetDetailedGPUInfoContext,
+		gpuModels:   unit.GetDetailedGPUHostContext,
 	}
 }
 
@@ -238,11 +238,11 @@ func buildReportSpecs(store *reportSnapshotStore, sources reportSources, config 
 	if config.enableGPU {
 		specs = append(specs, reportSpec("gpu", config.gpuInterval, func(ctx context.Context) error {
 			started := time.Now()
-			values, err := sources.gpu()
+			values, err := sources.gpu(ctx)
 			var gpu *GPUReport
 			if err == nil {
 				gpu = detailedGPUReport(values)
-			} else if models, modelErr := sources.gpuModels(); modelErr == nil && len(models) > 0 {
+			} else if models, modelErr := sources.gpuModels(ctx); modelErr == nil && len(models) > 0 {
 				gpu = &GPUReport{Models: append([]string(nil), models...)}
 			}
 			if err == nil {

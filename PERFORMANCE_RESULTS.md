@@ -321,3 +321,34 @@ Apple M4/macOS、100,000 次稳态 benchmark：
 - 1 小时成功 TTL、1 分钟失败/部分失败 TTL、配置 key、显式失效、容量 8 LRU；
 - 64 路并发冷读只执行一次公网 loader，64 路静态信息冷读只执行一次系统 loader；
 - 专项测试 10 次、专项 race 5 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
+
+## A-301 GPU 懒初始化、targeted 采样和命令边界
+
+GPU 子系统不再在 Linux package 初始化时执行 `nvidia-smi` 来猜测 vendor。默认 collector 的构造不做文件查询或子进程调用；只有 `--gpu` 显式启用后，GPU sampler 才会查找可用 provider 并采集。基础信息路径在 GPU capability 关闭时直接报告 `None`，不会运行 `system_profiler`、`lspci`、`pciconf` 或详细采集工具；report engine 也不会创建 GPU worker。Linux 基础型号优先读取 sysfs DRM，Windows 保留原生 DXGI，必须使用命令的 fallback 统一进入受控 runner。
+
+首次启用时依次尝试实际可执行的 NVIDIA、AMD provider，静态 UUID/card ID、型号和总显存只采集一次；每 3 秒动态采样只获取已用显存、利用率和温度。64 路并发静态冷读合并为一次 provider 调用，返回值始终复制所有权。显卡拓扑改变会使静态元数据失效并在 backoff 后重建；手动刷新也有显式失效入口。
+
+NVIDIA 从完整 `nvidia-smi -q -x` XML 改成以稳定 UUID 关联的 selective CSV query。静态命令只请求 `uuid,name,memory.total`，动态命令只请求 `uuid,memory.used,utilization.gpu,temperature.gpu`；官方标记为 N/A/Not Supported 的可选动态指标安全归零，真实 NaN、Inf、越界利用率和显存矛盾则拒绝。AMD 从 `--showallinfo` 改为 `showproductname/showuse/showmeminfo/showtemp` 的 JSON 定向查询，card key 排序确保多卡顺序稳定，并兼容 junction/edge/memory 温度字段。
+
+所有 GPU 外部命令直接使用参数数组、不经过 shell，并同时服从 sampler context 和 2 秒内部上限。stdout、stderr 各自最多保留 1MiB，超限后只丢弃后续字节并返回错误；进程等待额外限制为 250ms。provider 发现失败和动态命令失败分别执行 3 秒起、最高 1 分钟的指数冷却，外层 sampler 继续提供独立 backoff 和 stale 快照，持续故障不会形成命令风暴。设备数最多 64、名称最多 256 UTF-8 bytes，动态数值必须有限且在协议边界内。
+
+Apple M4/macOS、`GOMAXPROCS=1`、500,000 次稳态 benchmark：
+
+| Hot path | ns/op | B/op | allocs/op | 结果 |
+|---|---:|---:|---:|---|
+| NVIDIA 完整 XML detailed parse | 11,619～11,847 | 7,960 | 211 | 同进程兼容基线 |
+| NVIDIA targeted dynamic CSV | 351～408 | 336 | 6 | 快 28.5～33.7×，分配次数减少 97.2% |
+| AMD targeted typed JSON | 3,089～3,225 | 1,848 | 25 | 相对 A-002 基线约快 33×，分配次数减少 49% |
+| cached model adapter | 39.3～42.7 | 16 | 1 | 不执行系统调用/命令 |
+| dynamic collector adapter（fake provider） | 95.7～102.4 | 96 | 2 | 含串行化、校验和所有权复制 |
+
+真实收益主要来自每周期只启动一个定向命令、删除启动时命令、静态字段不再重复查询，以及故障时的有界冷却；解析 benchmark 不包含外部工具本身的运行时间。
+
+正确性、安全和资源边界验证包括：
+
+- GPU 关闭时基础信息和 report engine 的 GPU source 调用数严格为零；
+- 静态信息并发冷读、缓存所有权、显式失效、动态重复采样、NVIDIA→AMD provider failover；
+- provider/dynamic 指数 backoff、错误恢复、拓扑变化后的静态重建和等待者 context 取消；
+- NVIDIA/AMD 双卡乱序 fixture、UUID/card ID 对齐、N/A 指标、畸形字段、NaN、显存矛盾和响应上限；
+- 真实 helper 子进程的 context 强制终止和 1MiB 输出炸弹；空设备报告保持平均值 0，不产生 NaN；
+- 专项测试 10 次、专项 race 5 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。

@@ -4,14 +4,13 @@
 package monitoring
 
 import (
-	"os/exec"
+	"context"
 	"strings"
 )
 
 // GpuName returns the name of the GPU on Darwin (macOS)
 func GpuName() string {
-	cmd := exec.Command("system_profiler", "SPDisplaysDataType")
-	output, err := cmd.Output()
+	output, err := (execGPUCommandRunner{}).Run(context.Background(), "system_profiler", "SPDisplaysDataType")
 	if err != nil {
 		return "Unknown"
 	}

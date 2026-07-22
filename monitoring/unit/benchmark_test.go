@@ -21,6 +21,7 @@ var (
 	benchmarkProcess     int
 	benchmarkNvidiaInfo  []NVIDIAGPUInfo
 	benchmarkAMDInfo     []AMDGPUInfo
+	benchmarkDetailedGPU []DetailedGPUInfo
 	benchmarkCPUName     string
 	benchmarkProcMemory  *ProcMemInfo
 	benchmarkNetworkUp   uint64
@@ -29,6 +30,16 @@ var (
 	benchmarkPIDCount    int
 	benchmarkIPAddress   ipAddressResult
 )
+
+type benchmarkGPUProvider struct{}
+
+func (benchmarkGPUProvider) Static(context.Context) ([]gpuDeviceStatic, error) {
+	return []gpuDeviceStatic{{id: "0", name: "Benchmark GPU", memoryTotal: 1024}}, nil
+}
+
+func (benchmarkGPUProvider) Dynamic(_ context.Context, metadata []gpuDeviceStatic) ([]DetailedGPUInfo, error) {
+	return []DetailedGPUInfo{{Name: metadata[0].name, MemoryTotal: metadata[0].memoryTotal, MemoryUsed: 512, Utilization: 50}}, nil
+}
 
 func BenchmarkCPU(b *testing.B) {
 	b.ReportAllocs()
@@ -223,12 +234,56 @@ func BenchmarkNvidiaDetailedInfoParsing(b *testing.B) {
 	}
 }
 
+func BenchmarkGPUCollectorCachedModels(b *testing.B) {
+	collector := newGPUCollector(func() []gpuProvider { return []gpuProvider{benchmarkGPUProvider{}} }, time.Now)
+	_, _ = collector.Models(context.Background())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, _ = collector.Models(context.Background())
+	}
+}
+
+func BenchmarkGPUCollectorSampleAdapter(b *testing.B) {
+	collector := newGPUCollector(func() []gpuProvider { return []gpuProvider{benchmarkGPUProvider{}} }, time.Now)
+	benchmarkDetailedGPU, _ = collector.Sample(context.Background())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkDetailedGPU, _ = collector.Sample(context.Background())
+	}
+}
+
+func BenchmarkNvidiaTargetedParsing(b *testing.B) {
+	static := []byte("0, NVIDIA Benchmark GPU 0, 24576\n1, NVIDIA Benchmark GPU 1, 24576\n")
+	dynamic := []byte("0, 4096, 37, 61\n1, 8192, 72, 68\n")
+	metadata, _ := parseNvidiaStaticCSV(static)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(dynamic)))
+	for range b.N {
+		benchmarkDetailedGPU, _ = parseNvidiaDynamicCSV(dynamic, metadata)
+	}
+}
+
 func BenchmarkAMDDetailedInfoParsing(b *testing.B) {
 	smi := ROCmSMI{data: []byte(benchmarkAMDJSON)}
 	b.ReportAllocs()
 	b.SetBytes(int64(len(smi.data)))
 	for range b.N {
 		benchmarkAMDInfo, _ = smi.GatherDetailedInfo()
+	}
+}
+
+func BenchmarkAMDTargetedParsing(b *testing.B) {
+	data := []byte(benchmarkAMDJSON)
+	metadata := []gpuDeviceStatic{
+		{id: "card0", name: "AMD Benchmark GPU 0", memoryTotal: 25769803776},
+		{id: "card1", name: "AMD Benchmark GPU 1", memoryTotal: 25769803776},
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	for range b.N {
+		benchmarkDetailedGPU, _ = parseAMDDynamicResponse(data, metadata)
 	}
 }
 

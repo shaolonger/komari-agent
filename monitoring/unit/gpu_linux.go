@@ -5,36 +5,41 @@ package monitoring
 
 import (
 	"bytes"
+	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
 
+var (
+	gpuExcludePatterns = []*regexp.Regexp{
+		regexp.MustCompile("^1111"),
+		regexp.MustCompile(`(?i)^cirrus logic (cl[-\s]?)?gd 5`),
+		regexp.MustCompile(`(?i)virtio`),
+		regexp.MustCompile(`(?i)vmware`),
+		regexp.MustCompile(`(?i)qxl`),
+		regexp.MustCompile(`(?i)hyper-v`),
+	}
+	adrenoModelPattern    = regexp.MustCompile(`adreno[-_](\d+)`)
+	maliModelPattern      = regexp.MustCompile(`mali[-_]([a-z]\d+)`)
+	allwinnerModelPattern = regexp.MustCompile(`sun\d+i-([a-z0-9]+)`)
+)
+
 func GpuName() string {
-	if name := getFromLspci(); name != "None" {
+	if name := getFromSysfsDRM(); name != "None" {
 		return name
 	}
-
-	if name := getFromSysfsDRM(); name != "None" {
+	if name := getFromLspci(); name != "None" {
 		return name
 	}
 	return "None"
 }
 
 func getFromLspci() string {
-	out, err := exec.Command("lspci").Output()
+	out, err := (execGPUCommandRunner{}).Run(context.Background(), "lspci")
 	if err != nil {
 		return "None"
-	}
-	excludePatterns := []string{
-		"^1111",                             // 1111 (rev 02)
-		`(?i)^cirrus logic (cl[-\s]?)?gd 5`, // CL-GD 系列 1990 年代中期的产物, 现常用于虚拟机
-		"(?i)virtio",
-		"(?i)vmware",
-		`(?i)qxl`, // SPICE 虚拟显卡
-		`(?i)hyper-v`,
 	}
 
 	lines := strings.Split(string(out), "\n")
@@ -42,8 +47,8 @@ func getFromLspci() string {
 	priorityVendors := []string{"nvidia", "amd", "radeon", "intel", "arc", "snap", "qualcomm", "snapdragon"}
 
 	isExcluded := func(name string) bool {
-		for _, pattern := range excludePatterns {
-			if matched, _ := regexp.MatchString(pattern, name); matched {
+		for _, pattern := range gpuExcludePatterns {
+			if pattern.MatchString(name) {
 				return true
 			}
 		}
@@ -193,8 +198,7 @@ func parseSocModel(driver string, rawBytes []byte) string {
 	// 高通 Adreno (Qualcomm)
 	if driver == "msm" || strings.Contains(lower, "adreno") {
 		// "adreno-750", "adreno-660"
-		re := regexp.MustCompile(`adreno[-_](\d+)`)
-		matches := re.FindStringSubmatch(lower)
+		matches := adrenoModelPattern.FindStringSubmatch(lower)
 		if len(matches) > 1 {
 			return "Qualcomm Adreno " + matches[1]
 		}
@@ -204,8 +208,7 @@ func parseSocModel(driver string, rawBytes []byte) string {
 	// ARM Mali (Rockchip/MediaTek/AmLogic)
 	if driver == "panfrost" || driver == "lima" || strings.Contains(lower, "mali") {
 		// "mali-g610", "mali-t860"
-		re := regexp.MustCompile(`mali[-_]([a-z]\d+)`)
-		matches := re.FindStringSubmatch(lower)
+		matches := maliModelPattern.FindStringSubmatch(lower)
 		if len(matches) > 1 {
 			return "ARM Mali " + strings.ToUpper(matches[1]) // Mali G610
 		}
@@ -228,8 +231,7 @@ func parseSocModel(driver string, rawBytes []byte) string {
 	// Allwinner (全志)
 	// "allwinner,sun50i-h6-display-engine"
 	if strings.Contains(lower, "allwinner") || strings.Contains(lower, "sun50i") || strings.Contains(lower, "sun8i") {
-		re := regexp.MustCompile(`sun\d+i-([a-z0-9]+)`)
-		matches := re.FindStringSubmatch(lower)
+		matches := allwinnerModelPattern.FindStringSubmatch(lower)
 		if len(matches) > 1 {
 			model := strings.ToUpper(matches[1])
 			return "Allwinner " + model

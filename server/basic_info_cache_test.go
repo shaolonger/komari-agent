@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 )
 
 func TestStaticBasicInfoCacheLoadsOnceConcurrentlyAndInvalidates(t *testing.T) {
@@ -36,5 +38,24 @@ func TestStaticBasicInfoCacheLoadsOnceConcurrentlyAndInvalidates(t *testing.T) {
 	cache.Invalidate()
 	if result := cache.Get(); result.CPUName != "cpu-2" || loads.Load() != 2 {
 		t.Fatalf("refreshed result = %+v, loads = %d", result, loads.Load())
+	}
+}
+
+func TestStaticBasicInfoDoesNotProbeGPUWhenDisabled(t *testing.T) {
+	var probes atomic.Int32
+	host := monitoring.StaticHostInfo{CPUName: "fixture", CPUCores: 4}
+	result := assembleStaticBasicInfo(host, false, func() string {
+		probes.Add(1)
+		return "should not run"
+	})
+	if probes.Load() != 0 || result.GPUName != "None" {
+		t.Fatalf("disabled GPU result = %+v, probes = %d", result, probes.Load())
+	}
+	result = assembleStaticBasicInfo(host, true, func() string {
+		probes.Add(1)
+		return "fixture GPU"
+	})
+	if probes.Load() != 1 || result.GPUName != "fixture GPU" {
+		t.Fatalf("enabled GPU result = %+v, probes = %d", result, probes.Load())
 	}
 }

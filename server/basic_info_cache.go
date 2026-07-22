@@ -53,13 +53,21 @@ func (cache *staticBasicInfoCache) Invalidate() {
 
 func loadStaticBasicInfo() staticBasicInfo {
 	host := monitoring.GetStaticHostInfo()
+	return assembleStaticBasicInfo(host, flags.EnableGPU, monitoring.GpuName)
+}
+
+func assembleStaticBasicInfo(host monitoring.StaticHostInfo, enableGPU bool, gpuName func() string) staticBasicInfo {
+	name := "None"
+	if enableGPU && gpuName != nil {
+		name = gpuName()
+	}
 	return staticBasicInfo{
 		CPUName:        host.CPUName,
 		CPUCores:       host.CPUCores,
 		Architecture:   host.CPUArchitecture,
 		OSName:         host.OSName,
 		KernelVersion:  host.KernelVersion,
-		GPUName:        monitoring.GpuName(),
+		GPUName:        name,
 		Virtualization: host.Virtualization,
 		AgentVersion:   update.CurrentVersion,
 	}

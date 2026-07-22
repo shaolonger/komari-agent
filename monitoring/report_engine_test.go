@@ -45,8 +45,14 @@ func TestReportEngineEncodingNeverCallsPlatformSources(t *testing.T) {
 			called()
 			return 42
 		},
-		gpu:       func() ([]unit.DetailedGPUInfo, error) { return nil, nil },
-		gpuModels: func() ([]string, error) { return nil, nil },
+		gpu: func(context.Context) ([]unit.DetailedGPUInfo, error) {
+			called()
+			return nil, nil
+		},
+		gpuModels: func(context.Context) ([]string, error) {
+			called()
+			return nil, nil
+		},
 	}
 	config := reportEngineConfig{
 		fastInterval:       time.Hour,

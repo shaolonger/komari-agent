@@ -106,7 +106,7 @@
 
 ## Phase A3：GPU、Ping 与本地流量
 
-- [ ] **A-301 GPU 懒初始化、targeted 采样和命令边界**
+- [x] **A-301 GPU 懒初始化、targeted 采样和命令边界**
   - GPU 未启用时零子进程。
   - 静态/动态信息分频率，优先原生 API。
   - 外部命令 context、输出上限、错误 backoff；空 GPU 不产生 NaN。

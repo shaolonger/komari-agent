@@ -4,14 +4,13 @@
 package monitoring
 
 import (
-	"os/exec"
+	"context"
 	"strings"
 )
 
 // GpuName returns the name of the GPU on FreeBSD
 func GpuName() string {
-	cmd := exec.Command("pciconf", "-lv")
-	output, err := cmd.Output()
+	output, err := (execGPUCommandRunner{}).Run(context.Background(), "pciconf", "-lv")
 	if err != nil {
 		return "Unknown"
 	}
