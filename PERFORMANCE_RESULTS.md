@@ -124,3 +124,38 @@ Linux 确定性压力 fixture：10,000 条 `/proc/net` socket 行约 120～137µ
 - fake clock 周期、强制刷新、时钟回拨和 64 路并发冷读单 source call；
 - 非 Linux TCP/UDP socket 类型分类；
 - Linux amd64/arm64、Windows amd64、FreeBSD amd64、macOS arm64 的 `CGO_ENABLED=0 go build ./...`。
+
+## A-106 类型化不可变 Snapshot 与报告编码器
+
+报告系统现在由 A-101 的 context sampler runtime 驱动：CPU、memory、load、network 为 1 秒采样，uptime/socket/process 为 5 秒，disk 为 30 秒，GPU 为 3 秒。每个 worker 独立更新 copy-on-write 的类型化快照；`GenerateReport` 只执行一次 atomic snapshot load 和 JSON v1 编码，不再调用系统 API、读取 `/proc` 或启动命令。
+
+类型化 wire struct 的字段顺序与旧 `map[string]interface{}` 的字典序 JSON 保持一致；CPU 最小值、错误 message、GPU detailed/fallback 和所有 v1 字段保持兼容。编码器复用上限 64KB 的 buffer，输出仍使用独立 byte slice，避免队列/网络异步消费时被覆盖。NaN/Inf 在副本中归零，不会破坏已发布快照或导致整份遥测丢失。
+
+验证命令：
+
+```sh
+go test ./monitoring -run '^$' \
+  -bench 'Benchmark(GenerateReport|EncodeReportV1)$' \
+  -benchtime=100000x -benchmem -count=5
+```
+
+Apple M4/macOS 稳态结果：
+
+| Benchmark | A-105 后 | A-106 后 | 结果 |
+|---|---:|---:|---:|
+| GenerateReport | 1.712～1.748ms | 0.621～0.877µs | 报告构建约快 1,950～2,810× |
+| allocations | 459 allocs/op | 3 allocs/op | 减少 99.35% |
+| allocated bytes | 约 68.5KB/op | 1,313 B/op | 减少约 98.1% |
+| EncodeReportV1 | 无 | 0.605～0.642µs | 366-byte v1 fixture |
+
+与最初 2.135 秒的串行报告基线相比，稳态报告构建约快 240 万～340 万倍；系统采样成本由独立 worker 按其自身频率承担，不再叠加到发送时延。
+
+正确性验证包括：
+
+- 无 GPU、GPU fallback、GPU detailed 空数组和错误 message 的 JSON v1 byte golden；
+- copy-on-write 发布时复制 GPU slice，外部 source 和 snapshot reader 均无法修改内部状态；
+- stale deadline、失败后保留最后值和 metadata 错误；
+- NaN/Inf 清洗不修改调用方快照；
+- 并发 publish/encode 的 race 回归；
+- fake platform sources 采样完成后连续编码 1,000 次，source 调用数严格不变；
+- 全量 unit、vet、race 与 Linux/Windows/FreeBSD 静态构建。

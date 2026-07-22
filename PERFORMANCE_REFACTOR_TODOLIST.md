@@ -64,7 +64,7 @@
   - 其他平台降低子进程/句柄创建并缓存平台资源。
   - 测试：大量连接/进程 fixture、权限不足、平台 build、benchmark。
 
-- [ ] **A-106 类型化不可变 Snapshot 与报告编码器**
+- [x] **A-106 类型化不可变 Snapshot 与报告编码器**
   - 替换嵌套 `map[string]interface{}`。
   - report build 只读取快照，不触发系统调用。
   - JSON v1 golden 完全兼容，复用有界 buffer。

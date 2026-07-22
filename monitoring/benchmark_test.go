@@ -1,20 +1,21 @@
 package monitoring
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 var benchmarkEncodedReport []byte
 
-// BenchmarkGenerateReport intentionally exercises the current end-to-end
-// report path, including platform calls. Run it with -benchtime=1x when a
-// quick baseline is needed because the legacy CPU and network samplers block.
+// BenchmarkGenerateReport measures the steady-state v1 report build. Platform
+// sources are sampled independently and are deliberately absent from this path.
 func BenchmarkGenerateReport(b *testing.B) {
-	originalGPU := flags.EnableGPU
-	originalMonthRotate := flags.MonthRotate
-	flags.EnableGPU = false
-	flags.MonthRotate = 0
+	store := newReportSnapshotStore(time.Now)
+	store.current.Store(benchmarkReportSnapshot())
+	engine := &ReportEngine{store: store}
+	previous := defaultReportEngine.Swap(engine)
 	b.Cleanup(func() {
-		flags.EnableGPU = originalGPU
-		flags.MonthRotate = originalMonthRotate
+		defaultReportEngine.Store(previous)
 	})
 
 	b.ReportAllocs()
@@ -25,5 +26,27 @@ func BenchmarkGenerateReport(b *testing.B) {
 	b.StopTimer()
 	if len(benchmarkEncodedReport) > 0 {
 		b.ReportMetric(float64(len(benchmarkEncodedReport)), "bytes/report")
+	}
+}
+
+func BenchmarkEncodeReportV1(b *testing.B) {
+	snapshot := benchmarkReportSnapshot()
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkEncodedReport, _ = encodeReportV1(snapshot)
+	}
+}
+
+func benchmarkReportSnapshot() *ReportSnapshot {
+	return &ReportSnapshot{
+		Connections: ConnectionsReport{TCP: 128, UDP: 16},
+		CPU:         CPUReport{Usage: 37.5},
+		Disk:        DiskReport{Total: 1 << 40, Used: 1 << 39},
+		Load:        LoadReport{Load1: 1.25, Load5: 1.5, Load15: 2},
+		Network:     NetworkReport{Up: 1024, Down: 2048, TotalUp: 1 << 30, TotalDown: 2 << 30},
+		Process:     256,
+		RAM:         MemoryReport{Total: 32 << 30, Used: 16 << 30},
+		Swap:        MemoryReport{Total: 4 << 30, Used: 1 << 30},
+		Uptime:      86_400,
 	}
 }

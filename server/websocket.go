@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -91,6 +92,12 @@ func shouldRateLimitControlRequest(message controlPlaneMessage) bool {
 }
 
 func EstablishWebSocketConnection() {
+	if err := monitoring.StartReportSampler(context.Background()); err != nil {
+		log.Printf("Failed to start report sampler: %v", err)
+		return
+	}
+	defer monitoring.StopReportSampler()
+
 	websocketEndpoint := buildClientWebSocketEndpoint("/api/clients/report", nil)
 
 	// 转换中文域名为 ASCII 兼容编码
