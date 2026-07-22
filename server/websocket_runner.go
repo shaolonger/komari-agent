@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ const (
 	defaultTelemetryHeartbeatInterval = 30 * time.Second
 	defaultTelemetryReadWait          = 75 * time.Second
 	defaultTelemetryWriteTimeout      = 10 * time.Second
+	defaultTelemetryDrainTimeout      = 5 * time.Second
 	defaultTelemetryReadLimit         = telemetryv2.MaxFrameSize
 	defaultStableConnectionThreshold  = time.Minute
 	maximumReconnectBackoff           = time.Minute
@@ -43,10 +45,12 @@ type telemetryGenerationConfig struct {
 	heartbeatInterval time.Duration
 	readWait          time.Duration
 	writeTimeout      time.Duration
+	drainTimeout      time.Duration
 	readLimit         int64
 	now               func() time.Time
 	buildFrame        func(telemetryProtocol) (int, []byte, error)
 	handleMessage     func([]byte)
+	queue             *outboundQueue
 }
 
 type telemetryRunner struct {
@@ -113,6 +117,7 @@ func newTelemetryRunner(endpoint string) *telemetryRunner {
 		heartbeatInterval: defaultTelemetryHeartbeatInterval,
 		readWait:          defaultTelemetryReadWait,
 		writeTimeout:      defaultTelemetryWriteTimeout,
+		drainTimeout:      defaultTelemetryDrainTimeout,
 		readLimit:         defaultTelemetryReadLimit,
 		now:               time.Now,
 		buildFrame:        buildTelemetryFrame,
@@ -121,6 +126,10 @@ func newTelemetryRunner(endpoint string) *telemetryRunner {
 }
 
 func (runner *telemetryRunner) Run(ctx context.Context) error {
+	queue := newOutboundQueue(ctx, defaultReliableQueueCapacity, defaultReliableWriteAttempts)
+	runner.generation.queue = queue
+	defer queue.Close(true)
+
 	failedConnections := 0
 	shortGenerations := 0
 	for {
@@ -151,10 +160,9 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 		connectedAt := runner.generation.now()
 		log.Println("WebSocket connected")
 		diagnostics.RecordWebSocketConnected()
+		queue.ResetEphemeral()
 		runner.generation.handleMessage = func(message []byte) {
-			if safe, ok := session.(*ws.SafeConn); ok {
-				handleWebSocketMessage(safe, message)
-			}
+			handleWebSocketMessage(queue, message)
 		}
 		err = runTelemetryGeneration(ctx, session, protocol, runner.generation)
 		diagnostics.RecordWebSocketDisconnected()
@@ -194,8 +202,13 @@ func runTelemetryGeneration(
 		_ = session.Close()
 		return err
 	}
-	generationCtx, cancel := context.WithCancel(parent)
-	defer cancel()
+	// The writer intentionally outlives producer cancellation during graceful
+	// shutdown so reliable control results can drain within a fixed deadline.
+	base := context.WithoutCancel(parent)
+	generationCtx, cancelGeneration := context.WithCancel(base)
+	writerCtx, cancelWriter := context.WithCancel(base)
+	defer cancelGeneration()
+	defer cancelWriter()
 
 	if err := session.SetReadDeadline(config.now().Add(config.readWait)); err != nil {
 		_ = session.Close()
@@ -206,13 +219,17 @@ func runTelemetryGeneration(
 		return session.SetReadDeadline(config.now().Add(config.readWait))
 	})
 
-	errorsChannel := make(chan error, 3)
+	errorsChannel := make(chan error, 4)
+	writerDone := make(chan struct{})
 	var workers sync.WaitGroup
-	startWorker := func(run func(context.Context) error) {
+	startWorker := func(workerContext context.Context, done chan struct{}, run func(context.Context) error) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			if err := run(generationCtx); err != nil {
+			if done != nil {
+				defer close(done)
+			}
+			if err := run(workerContext); err != nil && workerContext.Err() == nil {
 				select {
 				case errorsChannel <- err:
 				default:
@@ -220,31 +237,56 @@ func runTelemetryGeneration(
 			}
 		}()
 	}
-	startWorker(func(ctx context.Context) error { return readTelemetryMessages(ctx, session, config.handleMessage) })
-	startWorker(func(ctx context.Context) error { return writeTelemetryReports(ctx, session, protocol, config) })
-	startWorker(func(ctx context.Context) error { return writeTelemetryHeartbeats(ctx, session, config) })
+	startWorker(generationCtx, nil, func(ctx context.Context) error {
+		return readTelemetryMessages(ctx, session, config.handleMessage)
+	})
+	startWorker(generationCtx, nil, func(ctx context.Context) error {
+		return produceTelemetryReports(ctx, protocol, config)
+	})
+	startWorker(generationCtx, nil, func(ctx context.Context) error {
+		return produceTelemetryHeartbeats(ctx, config)
+	})
+	startWorker(writerCtx, writerDone, func(ctx context.Context) error {
+		return writeOutboundFrames(ctx, session, config)
+	})
 
-	var generationErr error
 	select {
-	case generationErr = <-errorsChannel:
+	case generationErr := <-errorsChannel:
+		cancelGeneration()
+		cancelWriter()
+		config.queue.ResetEphemeral()
+		_ = session.Close()
+		workers.Wait()
+		return generationErr
 	case <-parent.Done():
-		generationErr = parent.Err()
+		cancelGeneration()
+		config.queue.Close(true)
+		timer := time.NewTimer(config.drainTimeout)
+		select {
+		case <-writerDone:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+			diagnostics.RecordQueueDrainTimeout()
+			cancelWriter()
+		}
+		cancelWriter()
+		_ = session.Close()
+		workers.Wait()
+		return parent.Err()
 	}
-	cancel()
-	_ = session.Close()
-	workers.Wait()
-	return generationErr
 }
 
 func validateTelemetryGenerationConfig(config telemetryGenerationConfig) error {
-	if config.reportInterval <= 0 || config.heartbeatInterval <= 0 || config.readWait <= 0 || config.writeTimeout <= 0 {
+	if config.reportInterval <= 0 || config.heartbeatInterval <= 0 || config.readWait <= 0 || config.writeTimeout <= 0 || config.drainTimeout <= 0 {
 		return errors.New("telemetry generation intervals and deadlines must be positive")
 	}
-	if config.readLimit <= 0 || config.now == nil || config.buildFrame == nil {
-		return errors.New("telemetry generation requires read limit, clock and frame builder")
-	}
-	if config.handleMessage == nil {
-		config.handleMessage = func([]byte) {}
+	if config.readLimit <= 0 || config.now == nil || config.buildFrame == nil || config.queue == nil {
+		return errors.New("telemetry generation requires read limit, clock, frame builder and outbound queue")
 	}
 	return nil
 }
@@ -269,24 +311,19 @@ func readTelemetryMessages(ctx context.Context, session telemetrySession, handle
 	}
 }
 
-func writeTelemetryReports(
+func produceTelemetryReports(
 	ctx context.Context,
-	session telemetrySession,
 	protocol telemetryProtocol,
 	config telemetryGenerationConfig,
 ) error {
-	send := func() error {
+	publish := func() error {
 		messageType, payload, encodeErr := config.buildFrame(protocol)
 		if encodeErr != nil {
 			log.Printf("Telemetry v2 encoding failed; sent JSON v1 fallback: %v", encodeErr)
 		}
-		if err := session.WriteMessageWithDeadline(config.now().Add(config.writeTimeout), messageType, payload); err != nil {
-			return fmt.Errorf("write telemetry report: %w", err)
-		}
-		diagnostics.RecordWebSocketMessageSent()
-		return nil
+		return config.queue.EnqueueTelemetry(messageType, payload)
 	}
-	if err := send(); err != nil {
+	if err := publish(); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(config.reportInterval)
@@ -296,14 +333,14 @@ func writeTelemetryReports(
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := send(); err != nil {
+			if err := publish(); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func writeTelemetryHeartbeats(ctx context.Context, session telemetrySession, config telemetryGenerationConfig) error {
+func produceTelemetryHeartbeats(ctx context.Context, config telemetryGenerationConfig) error {
 	ticker := time.NewTicker(config.heartbeatInterval)
 	defer ticker.Stop()
 	for {
@@ -311,10 +348,32 @@ func writeTelemetryHeartbeats(ctx context.Context, session telemetrySession, con
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := session.WriteMessageWithDeadline(config.now().Add(config.writeTimeout), websocket.PingMessage, nil); err != nil {
-				return fmt.Errorf("write WebSocket heartbeat: %w", err)
+			if err := config.queue.EnqueueHeartbeat(); err != nil {
+				return err
 			}
 		}
+	}
+}
+
+func writeOutboundFrames(ctx context.Context, session telemetrySession, config telemetryGenerationConfig) error {
+	for {
+		frame, err := config.queue.Take(ctx)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := session.WriteMessageWithDeadline(
+			config.now().Add(config.writeTimeout),
+			frame.messageType,
+			frame.payload,
+		); err != nil {
+			config.queue.Nack(frame)
+			return fmt.Errorf("write outbound WebSocket frame: %w", err)
+		}
+		config.queue.Ack(frame)
+		diagnostics.RecordWebSocketMessageSent()
 	}
 }
 

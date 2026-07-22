@@ -17,7 +17,6 @@ import (
 	"github.com/komari-monitor/komari-agent/protocol/telemetryv2"
 	"github.com/komari-monitor/komari-agent/terminal"
 	"github.com/komari-monitor/komari-agent/utils"
-	"github.com/komari-monitor/komari-agent/ws"
 )
 
 const defaultMaxControlRequests = 10
@@ -133,7 +132,7 @@ func buildTelemetryFrameWith(
 	return websocket.TextMessage, generateV1(), encodeErr
 }
 
-func handleWebSocketMessage(conn *ws.SafeConn, messageRaw []byte) {
+func handleWebSocketMessage(resultWriter pingResultWriter, messageRaw []byte) {
 	var message controlPlaneMessage
 	if err := json.Unmarshal(messageRaw, &message); err != nil {
 		log.Println("Bad ws message:", err)
@@ -155,7 +154,7 @@ func handleWebSocketMessage(conn *ws.SafeConn, messageRaw []byte) {
 		return
 	}
 	if isPingControlMessage(message) {
-		go NewPingTask(conn, message.PingTaskID, message.PingType, message.PingTarget)
+		go NewPingTask(resultWriter, message.PingTaskID, message.PingType, message.PingTarget)
 	}
 }
 

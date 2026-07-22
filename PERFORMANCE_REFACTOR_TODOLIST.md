@@ -83,7 +83,7 @@
   - read limit、write deadline、pong deadline。
   - 测试：断线、半开、慢写、超限消息、替换连接、取消、race、泄漏检测。
 
-- [ ] **A-202 有界优先级发送队列与可靠 drain**
+- [x] **A-202 有界优先级发送队列与可靠 drain**
   - telemetry 可合并最新，任务结果/控制响应可靠。
   - 队列、重试、关闭都有明确上限和指标。
   - 测试：过载、顺序、合并、可靠消息、shutdown、race、benchmark。

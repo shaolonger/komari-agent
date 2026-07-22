@@ -68,6 +68,97 @@ func TestTelemetryGenerationHeartbeatAndCancellation(t *testing.T) {
 	}
 }
 
+func TestTelemetryGenerationGracefulShutdownDrainsReliableQueue(t *testing.T) {
+	session := newFakeTelemetrySession()
+	writeStarted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	var startedOnce sync.Once
+	session.writeHook = func(deadline time.Time, messageType int, payload []byte) error {
+		startedOnce.Do(func() { close(writeStarted) })
+		<-releaseWrite
+		session.writes <- fakeTelemetryWrite{
+			deadline:    deadline,
+			messageType: messageType,
+			payload:     append([]byte(nil), payload...),
+		}
+		return nil
+	}
+	config := testTelemetryGenerationConfig()
+	if err := config.queue.EnqueueReliable(context.Background(), websocket.TextMessage, []byte("reliable-result")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() { finished <- runTelemetryGeneration(ctx, session, telemetryProtocolV1, config) }()
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reliable drain write did not start")
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		t.Fatalf("generation returned before in-flight reliable write drained: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseWrite)
+	write := waitFakeTelemetryWrite(t, session.writes)
+	if string(write.payload) != "reliable-result" {
+		t.Fatalf("drained payload = %q", write.payload)
+	}
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("generation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("generation did not finish after reliable drain")
+	}
+	if telemetry, reliable := config.queue.Depth(); telemetry != 0 || reliable != 0 {
+		t.Fatalf("drained queue depth = %d/%d, want 0/0", telemetry, reliable)
+	}
+}
+
+func TestTelemetryGenerationShutdownDrainTimeoutIsBounded(t *testing.T) {
+	session := newFakeTelemetrySession()
+	writeStarted := make(chan struct{})
+	var startedOnce sync.Once
+	session.writeHook = func(time.Time, int, []byte) error {
+		startedOnce.Do(func() { close(writeStarted) })
+		<-session.closed
+		return errors.New("fixture writer closed")
+	}
+	config := testTelemetryGenerationConfig()
+	config.drainTimeout = 20 * time.Millisecond
+	if err := config.queue.EnqueueReliable(context.Background(), websocket.TextMessage, []byte("bounded-result")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() { finished <- runTelemetryGeneration(ctx, session, telemetryProtocolV1, config) }()
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reliable write did not start")
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("generation error = %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("drain timeout did not bound shutdown")
+	}
+	if elapsed := time.Since(started); elapsed < config.drainTimeout || elapsed > 200*time.Millisecond {
+		t.Fatalf("bounded drain elapsed = %s", elapsed)
+	}
+	if _, reliable := config.queue.Depth(); reliable != 1 {
+		t.Fatalf("failed in-flight reliable frame depth = %d, want retained frame", reliable)
+	}
+}
+
 func TestTelemetryGenerationRepeatedCancellationJoinsWorkers(t *testing.T) {
 	for iteration := range 50 {
 		session := newFakeTelemetrySession()
@@ -416,12 +507,14 @@ func testTelemetryGenerationConfig() telemetryGenerationConfig {
 		heartbeatInterval: time.Hour,
 		readWait:          time.Hour,
 		writeTimeout:      100 * time.Millisecond,
+		drainTimeout:      100 * time.Millisecond,
 		readLimit:         64 * 1024,
 		now:               time.Now,
 		buildFrame: func(telemetryProtocol) (int, []byte, error) {
 			return websocket.TextMessage, []byte("fixture-report"), nil
 		},
 		handleMessage: func([]byte) {},
+		queue:         newOutboundQueue(context.Background(), 8, 3),
 	}
 }
 

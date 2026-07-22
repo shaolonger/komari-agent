@@ -65,7 +65,9 @@ type metrics struct {
 	telemetryQueue    atomic.Int64
 	controlQueue      atomic.Int64
 	telemetryMerged   atomic.Uint64
+	controlQueueRetry atomic.Uint64
 	controlQueueDrops atomic.Uint64
+	queueDrainTimeout atomic.Uint64
 }
 
 type DurationSnapshot struct {
@@ -80,7 +82,9 @@ type QueueSnapshot struct {
 	TelemetryDepth  int64  `json:"telemetry_depth"`
 	ControlDepth    int64  `json:"control_depth"`
 	TelemetryMerged uint64 `json:"telemetry_merged"`
+	ControlRetries  uint64 `json:"control_retries"`
 	ControlDrops    uint64 `json:"control_drops"`
+	DrainTimeouts   uint64 `json:"drain_timeouts"`
 }
 
 type WebSocketSnapshot struct {
@@ -215,9 +219,21 @@ func RecordTelemetryMerged() {
 	}
 }
 
+func RecordControlQueueRetry() {
+	if Enabled() {
+		registry.controlQueueRetry.Add(1)
+	}
+}
+
 func RecordControlQueueDrop() {
 	if Enabled() {
 		registry.controlQueueDrops.Add(1)
+	}
+}
+
+func RecordQueueDrainTimeout() {
+	if Enabled() {
+		registry.queueDrainTimeout.Add(1)
 	}
 }
 
@@ -243,7 +259,9 @@ func CurrentSnapshot() Snapshot {
 			TelemetryDepth:  registry.telemetryQueue.Load(),
 			ControlDepth:    registry.controlQueue.Load(),
 			TelemetryMerged: registry.telemetryMerged.Load(),
+			ControlRetries:  registry.controlQueueRetry.Load(),
 			ControlDrops:    registry.controlQueueDrops.Load(),
+			DrainTimeouts:   registry.queueDrainTimeout.Load(),
 		},
 		WebSocket: WebSocketSnapshot{
 			Connects:     registry.wsConnects.Load(),

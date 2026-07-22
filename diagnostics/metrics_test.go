@@ -26,11 +26,20 @@ func TestDiagnosticsSnapshotContainsOnlyAggregateData(t *testing.T) {
 	ObserveReport(time.Now().Add(-time.Millisecond), 256, nil)
 	RecordPingRejected()
 	SetQueueDepth(3, 2)
+	RecordTelemetryMerged()
+	RecordControlQueueRetry()
+	RecordControlQueueDrop()
+	RecordQueueDrainTimeout()
 	RecordWebSocketConnected()
 
 	snapshot := CurrentSnapshot()
 	if snapshot.Samplers["cpu"].Count != 1 || snapshot.Report.Count != 1 || snapshot.ReportBytes != 256 {
 		t.Fatalf("unexpected diagnostics snapshot: %+v", snapshot)
+	}
+	if snapshot.Queue.TelemetryDepth != 3 || snapshot.Queue.ControlDepth != 2 ||
+		snapshot.Queue.TelemetryMerged != 1 || snapshot.Queue.ControlRetries != 1 ||
+		snapshot.Queue.ControlDrops != 1 || snapshot.Queue.DrainTimeouts != 1 {
+		t.Fatalf("unexpected queue diagnostics: %+v", snapshot.Queue)
 	}
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {

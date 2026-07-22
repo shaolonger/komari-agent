@@ -212,3 +212,31 @@ Apple M4/macOS、100,000 次稳态 benchmark：
 - 连接失败指数 cap、full-jitter 范围、retry 上限和重复短连接退避；
 - 真实本地 WebSocket 的 half-open 无 Pong 超时，以及正常 Pong 连续延长 read deadline；
 - 专项测试重复运行与 `-race`。
+
+## A-202 有界优先级发送队列与可靠 drain
+
+WebSocket 出站路径现在只有一个实际 socket writer。遥测生产器、heartbeat 和 Ping 结果不再并发写 Gorilla connection，而是进入按语义隔离的有界队列：遥测始终只保留最新一帧，heartbeat 最多保留一个，可靠控制结果使用容量 128 的 FIFO。这样即使网络写入速度低于采样速度，内存也不会随 backlog 无界增长。
+
+可靠 FIFO 默认最多跨 connection generation 尝试 3 次；失败写入执行 NACK 并保留队首，下一代连接仍先发送它。每连续发送 8 个可靠帧后会给 heartbeat/最新遥测一次机会，既保持控制结果 FIFO，也避免持续控制流饿死健康检查和监控数据。所有入队 payload 都复制所有权，调用方后续修改不会造成数据竞争或线上帧损坏。
+
+关闭过程先停止 reader/producer，丢弃已陈旧的 heartbeat/telemetry，再给可靠 FIFO 最多 5 秒排空；超时后强制关闭连接并 join 全部 worker。连接异常只清除 ephemeral 帧，不关闭跨代队列。队列深度、遥测合并数、可靠重试、可靠丢弃和 drain timeout 均进入默认关闭、无敏感字段的 diagnostics 聚合指标。
+
+Apple M4/macOS、100,000 次纯内存 benchmark（不含网络 I/O）：
+
+| Dispatch | ns/op | B/op | allocs/op | 说明 |
+|---|---:|---:|---:|---|
+| A-201 直接调用 writer 基线 | 1.335～1.343 | 0 | 0 | no-op socket writer，仅保留旧调度成本 |
+| 最新遥测合并入队 | 41～61 | 112 | 2 | 队列始终最多保留一份最新遥测 |
+| 可靠 FIFO 入队 + Take + Ack | 51～59 | 112 | 1 | 包含 payload 所有权复制和完整队列状态转换 |
+
+约 50ns 的可靠调度成本远低于真实网络写入，并换取了确定的内存上限、单写者安全和断线恢复。过载时的核心收益不是缩短一次函数调用，而是把 N 份待发遥测压缩为 1 份，消除慢连接下的无界工作和陈旧数据发送。
+
+正确性与安全验证包括：
+
+- 最新遥测合并、heartbeat 去重、可靠 FIFO 顺序和每 8 帧公平调度；
+- 容量耗尽时生产者阻塞，Ack 后恢复，context 取消和 Close 可唤醒全部等待者；
+- NACK 跨代保留、3 次上限、耗尽丢弃计数和后继 FIFO 顺序；
+- Ping capability 默认关闭时的 `ping_result` 仍作为可靠 text frame 入队，安全策略未放宽；
+- shutdown 正常 drain、慢 writer 的 5 秒生产上限语义、连接失败后的可靠帧保留；
+- 8 路可靠生产者、10,000 次遥测/heartbeat 合并和单 consumer 并发压力；
+- `server` 专项测试 10 次、专项 race 3 次、全量 unit/vet/race，以及 Linux amd64/arm64、Windows amd64、FreeBSD amd64 静态构建。
