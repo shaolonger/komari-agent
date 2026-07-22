@@ -44,7 +44,7 @@
   - 慢 sampler 不阻塞报告或其他 sampler。
   - 测试：fake clock、取消、超时、stale、reload、goroutine 泄漏、race、benchmark。
 
-- [ ] **A-102 CPU 与网络非阻塞差分采样**
+- [x] **A-102 CPU 与网络非阻塞差分采样**
   - 删除 `cpu.Percent(1s)` 和网络 `Sleep(1s)`。
   - 使用真实 elapsed 和 counter reset/wrap 处理。
   - 测试：首次样本、正常差分、重置、时间漂移、NIC 过滤、对照测试、benchmark。

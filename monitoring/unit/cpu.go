@@ -3,17 +3,28 @@ package monitoring
 import (
 	"bufio"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
+	"sync"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/shirou/gopsutil/v4/cpu"
 )
 
 var flags = pkg_flags.GlobalConfig
+
+type cpuTimesSource func(bool) ([]cpu.TimesStat, error)
+
+type cpuUsageSampler struct {
+	mu       sync.Mutex
+	source   cpuTimesSource
+	previous *cpu.TimesStat
+}
+
+var defaultCPUUsageSampler = newCPUUsageSampler(cpu.Times)
 
 type CpuInfo struct {
 	CPUName         string  `json:"cpu_name"`
@@ -53,12 +64,58 @@ func Cpu() CpuInfo {
 		cpuinfo.CPUCores = cores
 	}
 
-	percentages, err := cpu.Percent(1*time.Second, false)
-	if err == nil && len(percentages) > 0 {
-		cpuinfo.CPUUsage = percentages[0]
+	usage, err := defaultCPUUsageSampler.Sample()
+	if err == nil {
+		cpuinfo.CPUUsage = usage
 	}
 
 	return cpuinfo
+}
+
+func newCPUUsageSampler(source cpuTimesSource) *cpuUsageSampler {
+	return &cpuUsageSampler{source: source}
+}
+
+func (sampler *cpuUsageSampler) Sample() (float64, error) {
+	times, err := sampler.source(false)
+	if err != nil {
+		return 0, err
+	}
+	if len(times) == 0 {
+		return 0, nil
+	}
+	current := times[0]
+
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+	if sampler.previous == nil {
+		sampler.previous = &current
+		return 0, nil
+	}
+	previous := *sampler.previous
+	sampler.previous = &current
+	return calculateCPUUsage(previous, current), nil
+}
+
+func calculateCPUUsage(previous, current cpu.TimesStat) float64 {
+	previousTotal, previousBusy := cpuTotals(previous)
+	currentTotal, currentBusy := cpuTotals(current)
+	totalDelta := currentTotal - previousTotal
+	busyDelta := currentBusy - previousBusy
+	if totalDelta <= 0 || busyDelta <= 0 {
+		return 0
+	}
+	return math.Min(100, math.Max(0, busyDelta/totalDelta*100))
+}
+
+func cpuTotals(times cpu.TimesStat) (float64, float64) {
+	total := times.User + times.System + times.Idle + times.Nice + times.Iowait + times.Irq +
+		times.Softirq + times.Steal + times.Guest + times.GuestNice
+	if runtime.GOOS == "linux" {
+		total -= times.Guest
+		total -= times.GuestNice
+	}
+	return total, total - times.Idle - times.Iowait
 }
 
 // readCPUNameFromProc 从 /proc/cpuinfo 读取 CPU 名称
