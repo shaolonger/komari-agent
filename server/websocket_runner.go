@@ -164,7 +164,7 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 
 		failedConnections = 0
 		connectedAt := runner.generation.now()
-		log.Println("WebSocket connected")
+		log.Printf("WebSocket connected (telemetry protocol v%d)", protocol)
 		diagnostics.RecordWebSocketConnected()
 		queue.ResetEphemeral()
 		runner.generation.handleMessage = func(message []byte) {

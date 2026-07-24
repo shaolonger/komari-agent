@@ -1,6 +1,6 @@
 # Komari Agent 极致性能重构设计
 
-状态：执行中  
+状态：已完成
 基线：`2ac1fc8`（`v1.2.8` 后续终端修复）  
 配套清单：[`PERFORMANCE_REFACTOR_TODOLIST.md`](PERFORMANCE_REFACTOR_TODOLIST.md)
 性能基线：[`PERFORMANCE_BASELINE.md`](PERFORMANCE_BASELINE.md)

@@ -481,3 +481,68 @@ Agent 现在只在启动边界接受一份通过统一校验的外部配置。�
 - PGO on/off report、queue、Ping cache 与 netstatic benchmark；
 - Linux amd64/arm64、Windows amd64、FreeBSD amd64 的集中脚本交叉构建与静态/strip 检查；
 - 全量 release matrix、unit/vet/race、PGO test、workflow syntax 和安全脚本在 A-403 发布验收中再次执行。
+
+## A-403 全量跨平台、压力、安全回归和发布验收
+
+最终验收使用真实 Agent/Server 进程、真实 WebSocket、旧版本 tag、完整跨平台发布矩阵和 Linux PowerShell 安全门禁，覆盖的不只是当前平台 unit test。
+
+### 协议兼容与生命周期
+
+真实四象限兼容矩阵结果：
+
+| Agent | Server | 实际协议 | 结果 |
+|---|---|---|---|
+| v1.2.8 | v1.2.13 | JSON v1 | 基线连接和上报成功 |
+| v1.2.8 | v1.3.0 | JSON v1 | 新 Server 明确记录 protocol v1 |
+| v1.3.0 | v1.2.13 | JSON v1 | 新 Agent 明确记录 v1 fallback |
+| v1.3.0 | v1.3.0 | binary v2 | Agent 与 Server 均明确记录 protocol v2 |
+
+所有组合均在服务端数据库中产生 basic info；新数据库 `integrity_check=ok`。协议可见性日志只记录版本，不记录 Token、URL query 或报告字段。当前 Agent 收到 SIGINT 后依次输出 graceful shutdown 与 shutdown completed，并在有界时间内退出。
+
+服务端虚拟 Agent 压测进一步覆盖 Agent 的连接模型：2,000 个零 ramp 同时连接、每连接 3 次上报共 6,000/6,000 成功；10,000 个连接在 5 秒确定性 ramp 下 10,000/10,000 成功；100 节点、1 秒间隔、约 2 分钟长稳共 12,000/12,000 成功。零 ramp 10,000 拨号探针受本机 `somaxconn=128` 限制未全成，因此验收没有把不符合真实 full-jitter 重连模型的瞬时 backlog 冲击描述为通过。
+
+### 全包 Benchmark 与跨平台构建
+
+Apple M4/macOS arm64 的全包 benchmark sweep 使用 `-benchtime=100ms -count=1`，全部成功。代表性稳态结果：
+
+| 热路径 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| Generate JSON v1 report | 656.9 | 1,313 | 3 |
+| Encode JSON v1 snapshot | 652.9 | 1,313 | 3 |
+| Encode binary v2 | 70.37 | 288 | 2 |
+| DNS cache hit | 68.6 | 0 | 0 |
+| netstatic prefix query | 327.2 | 400 | 2 |
+| netstatic linear reference | 23,321 | 400 | 2 |
+| telemetry queue coalesce | 33.02 | 0 | 0 |
+| protocol v2 encode | 42.75 | 256 | 1 |
+| protocol v2 decode | 106.6 | 118 | 4 |
+
+`scripts/build-release.sh` 的完整 13 平台 dry-run 成功：
+
+- Windows amd64、arm64、386；
+- Linux amd64、arm64、386、arm；
+- Darwin amd64、arm64；
+- FreeBSD amd64、arm64、386、arm。
+
+每个产物均为 `CGO_ENABLED=0` 的目标平台二进制，并由同一集中构建器注入 `v1.3.0`、完整 commit、strip/trimpath/空 build ID 和版本化 PGO。两次 darwin/arm64 构建逐字节相同；strip 产物 8,411,122 bytes，对照未 strip 12,230,914 bytes。
+
+### 安全与供应链
+
+全部 GitHub Actions `uses:` 已固定为精确 40 位小写 commit SHA；本地 `./` Action 例外保留。供应链检查新增自动扫描，未来新增 floating tag 会直接失败。Linux PowerShell 运行完整安全回归时还发现旧扫描规则已与生产代码漂移，本次将规则收敛为：
+
+- 只允许两处明确、隔离并受显式 flag 控制的 production `InsecureSkipVerify`；
+- 测试中故意构造的 unsafe client 不计为生产例外；
+- 旧 cmd/root 特例被删除；
+- Token query 扫描、安装命令脱敏和供应链构建策略继续全部通过。
+
+最终门禁包括：
+
+- `go test ./...`、完整 `go test -race ./...`、`go vet ./...`；
+- 全包 benchmark、PGO profile smoke 和两次可复现构建；
+- 13 平台 release matrix；
+- workflow YAML/actionlint；
+- Linux PowerShell `verify-supply-chain-stage.ps1`；
+- Linux PowerShell `verify-security-regression.ps1 -SkipLiveReleaseCheck`；
+- 新旧协议矩阵、连接风暴、10k 抖动恢复和长稳。
+
+Release 资产合同为每个目标的 binary、`.sha256`、keyless cosign `.sig` 和 `.pem`，共 52 个资产。分支推送、GitHub 手动质量门禁、`v1.3.0` Release 创建、远端 Actions 等待和资产下载校验按用户要求在两个仓库本地 Todo 均完成后执行。
