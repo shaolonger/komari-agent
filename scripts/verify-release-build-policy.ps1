@@ -29,7 +29,7 @@ function Assert-NotContains {
 }
 
 $goMod = Get-Content -Raw -Path (Join-Path $repoRoot 'go.mod')
-if ($goMod -notmatch '(?m)^go 1\.26\.0$' -or $goMod -notmatch '(?m)^toolchain go1\.26\.5$') {
+if ($goMod -notmatch '(?m)^go 1\.26\.0\r?$' -or $goMod -notmatch '(?m)^toolchain go1\.26\.5\r?$') {
     throw 'go.mod does not pin the approved Go language and toolchain versions'
 }
 

@@ -545,4 +545,6 @@ Apple M4/macOS arm64 的全包 benchmark sweep 使用 `-benchtime=100ms -count=1
 - Linux PowerShell `verify-security-regression.ps1 -SkipLiveReleaseCheck`；
 - 新旧协议矩阵、连接风暴、10k 抖动恢复和长稳。
 
+首次 Windows GitHub Runner 门禁进一步发现 release policy 的 `go.mod` 版本正则只接受 LF；Windows checkout 的 CRLF 使正确的 Go/toolchain 版本被误报。行尾合同已显式改为 `\r?$`，并用 LF、CRLF fixture、Linux PowerShell 全量安全回归和 Windows Runner 共同验证，避免安全策略因平台文本格式产生假阴性或被迫关闭。
+
 Release 资产合同为每个目标的 binary、`.sha256`、keyless cosign `.sig` 和 `.pem`，共 52 个资产。分支推送、GitHub 手动质量门禁、`v1.3.0` Release 创建、远端 Actions 等待和资产下载校验按用户要求在两个仓库本地 Todo 均完成后执行。
