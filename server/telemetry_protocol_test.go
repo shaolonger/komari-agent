@@ -7,6 +7,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari-agent/protocol/telemetryv2"
+	"github.com/komari-monitor/komari-agent/protocol/telemetryv3"
 )
 
 func TestNegotiatedTelemetryProtocolSecureFallback(t *testing.T) {
@@ -14,6 +15,7 @@ func TestNegotiatedTelemetryProtocolSecureFallback(t *testing.T) {
 		"":                            telemetryProtocolV1,
 		telemetryv2.LegacySubprotocol: telemetryProtocolV1,
 		telemetryv2.Subprotocol:       telemetryProtocolV2,
+		telemetryv3.Subprotocol:       telemetryProtocolV3,
 	}
 	for selected, want := range tests {
 		got, err := negotiatedTelemetryProtocol(selected)
@@ -26,14 +28,48 @@ func TestNegotiatedTelemetryProtocolSecureFallback(t *testing.T) {
 	}
 }
 
-func TestTelemetryDialerAdvertisesV2ThenV1(t *testing.T) {
+func TestTelemetryDialerAdvertisesV3ThenV2ThenV1(t *testing.T) {
 	dialer := newTelemetryWSDialer()
-	want := []string{telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
+	want := []string{telemetryv3.Subprotocol, telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
 	if !reflect.DeepEqual(dialer.Subprotocols, want) {
 		t.Fatalf("Subprotocols = %#v, want %#v", dialer.Subprotocols, want)
 	}
 	if terminalDialer := newWSDialer(); len(terminalDialer.Subprotocols) != 0 {
 		t.Fatalf("generic/terminal dialer advertised telemetry protocols: %#v", terminalDialer.Subprotocols)
+	}
+}
+
+func TestBuildTelemetryFrameUsesV3AndSecureFallbacks(t *testing.T) {
+	v1 := []byte("json-v1")
+	v2 := []byte("binary-v2")
+	v3 := []byte("binary-v3")
+	typeID, payload, err := buildTelemetryFrameWithV3(
+		telemetryProtocolV3,
+		func() []byte { return v1 },
+		func() ([]byte, error) { return v2, nil },
+		func() ([]byte, error) { return v3, nil },
+	)
+	if err != nil || typeID != websocket.BinaryMessage || string(payload) != string(v3) {
+		t.Fatalf("v3 frame: type=%d payload=%q err=%v", typeID, payload, err)
+	}
+	wantErr := errors.New("v3 fixture error")
+	typeID, payload, err = buildTelemetryFrameWithV3(
+		telemetryProtocolV3,
+		func() []byte { return v1 },
+		func() ([]byte, error) { return v2, nil },
+		func() ([]byte, error) { return nil, wantErr },
+	)
+	if !errors.Is(err, wantErr) || typeID != websocket.BinaryMessage || string(payload) != string(v2) {
+		t.Fatalf("v2 fallback: type=%d payload=%q err=%v", typeID, payload, err)
+	}
+	typeID, payload, err = buildTelemetryFrameWithV3(
+		telemetryProtocolV3,
+		func() []byte { return v1 },
+		func() ([]byte, error) { return nil, errors.New("v2 fixture error") },
+		func() ([]byte, error) { return nil, wantErr },
+	)
+	if !errors.Is(err, wantErr) || typeID != websocket.TextMessage || string(payload) != string(v1) {
+		t.Fatalf("v1 fallback: type=%d payload=%q err=%v", typeID, payload, err)
 	}
 }
 

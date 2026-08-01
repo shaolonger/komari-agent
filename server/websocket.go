@@ -4,17 +4,20 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
 	"github.com/komari-monitor/komari-agent/protocol/telemetryv2"
+	"github.com/komari-monitor/komari-agent/protocol/telemetryv3"
 	"github.com/komari-monitor/komari-agent/terminal"
 	"github.com/komari-monitor/komari-agent/utils"
 )
@@ -101,6 +104,7 @@ type telemetryProtocol uint8
 const (
 	telemetryProtocolV1 telemetryProtocol = iota + 1
 	telemetryProtocolV2
+	telemetryProtocolV3
 )
 
 func negotiatedTelemetryProtocol(selected string) (telemetryProtocol, error) {
@@ -109,25 +113,58 @@ func negotiatedTelemetryProtocol(selected string) (telemetryProtocol, error) {
 		return telemetryProtocolV1, nil
 	case telemetryv2.Subprotocol:
 		return telemetryProtocolV2, nil
+	case telemetryv3.Subprotocol:
+		return telemetryProtocolV3, nil
 	default:
 		return telemetryProtocolV1, fmt.Errorf("server selected unsupported telemetry subprotocol %q", selected)
 	}
 }
 
 func buildTelemetryFrame(protocol telemetryProtocol) (messageType int, payload []byte, encodeErr error) {
-	return buildTelemetryFrameWith(protocol, monitoring.GenerateReport, monitoring.GenerateReportV2)
+	return buildTelemetryFrameWithV3(protocol, monitoring.GenerateReport, monitoring.GenerateReportV2, func() ([]byte, error) {
+		return monitoring.GenerateReportV3(defaultV3Aggregator, defaultV3Sequence.Add(1), time.Now(), false)
+	})
 }
+
+var (
+	defaultV3Sequence   atomic.Uint64
+	defaultV3Aggregator = monitoring.NewV3Aggregator(time.Minute)
+)
 
 func buildTelemetryFrameWith(
 	protocol telemetryProtocol,
 	generateV1 func() []byte,
 	generateV2 func() ([]byte, error),
 ) (messageType int, payload []byte, encodeErr error) {
+	return buildTelemetryFrameWithV3(protocol, generateV1, generateV2, func() ([]byte, error) {
+		return nil, errors.New("telemetry v3 generator is not configured")
+	})
+}
+
+func buildTelemetryFrameWithV3(
+	protocol telemetryProtocol,
+	generateV1 func() []byte,
+	generateV2 func() ([]byte, error),
+	generateV3 func() ([]byte, error),
+) (messageType int, payload []byte, encodeErr error) {
+	if protocol == telemetryProtocolV3 {
+		payload, encodeErr = generateV3()
+		if encodeErr == nil {
+			return websocket.BinaryMessage, payload, nil
+		}
+	}
 	if protocol == telemetryProtocolV2 {
 		payload, encodeErr = generateV2()
 		if encodeErr == nil {
 			return websocket.BinaryMessage, payload, nil
 		}
+	}
+	if protocol == telemetryProtocolV3 {
+		fallback, fallbackErr := generateV2()
+		if fallbackErr == nil {
+			return websocket.BinaryMessage, fallback, encodeErr
+		}
+		encodeErr = errors.Join(encodeErr, fallbackErr)
 	}
 	return websocket.TextMessage, generateV1(), encodeErr
 }
@@ -219,7 +256,7 @@ func newWSDialer() *websocket.Dialer {
 
 func newTelemetryWSDialer() *websocket.Dialer {
 	dialer := newWSDialer()
-	dialer.Subprotocols = []string{telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
+	dialer.Subprotocols = []string{telemetryv3.Subprotocol, telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
 	return dialer
 }
 

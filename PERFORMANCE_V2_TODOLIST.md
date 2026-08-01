@@ -12,7 +12,7 @@ concurrency surface and a dedicated commit.
 
 - [x] **A2-101 Implement strictly bounded telemetry v3 codec and goldens**
 - [x] **A2-102 Add adaptive aggregate envelopes and periodic checkpoints**
-- [ ] **A2-103 Negotiate v3 with secure v2/v1 fallback**
+- [x] **A2-103 Negotiate v3 with secure v2/v1 fallback**
 - [ ] **A2-104 Add durable ACK tracking and a bounded 0600 spool**
 
 ## A2-2 Ping
