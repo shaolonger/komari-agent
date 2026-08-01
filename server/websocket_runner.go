@@ -194,6 +194,7 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 			handleWebSocketMessageContext(ctx, queue, message)
 		}
 		err = runTelemetryGeneration(ctx, session, protocol, runner.generation)
+		activePingLease.Stop()
 		diagnostics.RecordWebSocketDisconnected()
 		if ctx.Err() != nil {
 			return ctx.Err()

@@ -39,6 +39,7 @@ type controlPlaneMessage struct {
 	PingTaskID uint   `json:"ping_task_id,omitempty"`
 	PingType   string `json:"ping_type,omitempty"`
 	PingTarget string `json:"ping_target,omitempty"`
+	pingLeaseControl
 }
 
 func controlRequestLimit() int {
@@ -180,6 +181,12 @@ func handleWebSocketMessageContext(ctx context.Context, resultWriter pingResultW
 	var message controlPlaneMessage
 	if err := json.Unmarshal(messageRaw, &message); err != nil {
 		log.Println("Bad ws message:", err)
+		return
+	}
+	if message.Message == "ping_lease" {
+		if err := activePingLease.Apply(ctx, resultWriter, message.pingLeaseControl); err != nil {
+			log.Printf("Rejected Ping lease: %v", err)
+		}
 		return
 	}
 	if shouldRateLimitControlRequest(message) && !allowControlRequest(time.Now()) {
