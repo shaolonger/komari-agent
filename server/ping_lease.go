@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"sort"
 	"sync"
@@ -32,16 +33,19 @@ type pingLeaseControl struct {
 }
 
 type pingLeaseManager struct {
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	done     chan struct{}
-	revision uint64
-	now      func() time.Time
-	runTask  func(context.Context, pingResultWriter, pingLeaseTaskControl)
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	done       chan struct{}
+	revision   uint64
+	now        func() time.Time
+	runTask    func(context.Context, pingResultWriter, pingLeaseTaskControl)
+	batcher    *pingResultBatcher
+	newBatcher func(pingResultWriter) (*pingResultBatcher, error)
 }
 
 var activePingLease = &pingLeaseManager{
-	now: time.Now,
+	now:        time.Now,
+	newBatcher: newDefaultPingResultBatcher,
 	runTask: func(ctx context.Context, writer pingResultWriter, task pingLeaseTaskControl) {
 		activeControlWorkers.launch(func() {
 			NewPingTaskContext(ctx, writer, task.TaskID, task.Type, task.Target)
@@ -70,6 +74,19 @@ func (manager *pingLeaseManager) Apply(parent context.Context, writer pingResult
 		cancel()
 		return nil
 	}
+	taskWriter := writer
+	if manager.batcher == nil && manager.newBatcher != nil {
+		batcher, err := manager.newBatcher(writer)
+		if err != nil {
+			manager.mu.Unlock()
+			cancel()
+			return fmt.Errorf("open durable Ping result spool: %w", err)
+		}
+		manager.batcher = batcher
+	}
+	if manager.batcher != nil {
+		taskWriter = manager.batcher
+	}
 	previousCancel := manager.cancel
 	manager.cancel, manager.done, manager.revision = cancel, done, lease.Revision
 	manager.mu.Unlock()
@@ -78,7 +95,7 @@ func (manager *pingLeaseManager) Apply(parent context.Context, writer pingResult
 	}
 	go func() {
 		defer close(done)
-		manager.run(ctx, writer, lease.IssuedAt, tasks)
+		manager.run(ctx, taskWriter, lease.IssuedAt, tasks)
 	}()
 	return nil
 }
@@ -172,9 +189,21 @@ func (manager *pingLeaseManager) run(ctx context.Context, writer pingResultWrite
 func (manager *pingLeaseManager) Stop() {
 	manager.mu.Lock()
 	cancel := manager.cancel
+	batcher := manager.batcher
 	manager.cancel, manager.done = nil, nil
+	manager.batcher = nil
 	manager.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	if batcher != nil {
+		_ = batcher.Close()
+	}
+}
+
+func (manager *pingLeaseManager) HandleControl(message []byte) bool {
+	manager.mu.Lock()
+	batcher := manager.batcher
+	manager.mu.Unlock()
+	return batcher != nil && batcher.HandleControl(message)
 }

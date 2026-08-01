@@ -178,6 +178,9 @@ func handleWebSocketMessageContext(ctx context.Context, resultWriter pingResultW
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if activePingLease.HandleControl(messageRaw) {
+		return
+	}
 	var message controlPlaneMessage
 	if err := json.Unmarshal(messageRaw, &message); err != nil {
 		log.Println("Bad ws message:", err)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -253,6 +254,31 @@ func (queue *outboundQueue) RemoveTelemetryV3Reliable() {
 		frame := queue.reliable[index]
 		isV3 := frame.messageType == websocket.BinaryMessage && len(frame.payload) >= 4 && string(frame.payload[:4]) == "KMR3"
 		if isV3 {
+			frame.payload = nil
+			continue
+		}
+		kept = append(kept, frame)
+	}
+	queue.reliable = kept
+	queue.reliableBurst = 0
+	queue.updateDepthLocked()
+	queue.signalSpaceLocked()
+	if queue.hasItemsLocked() {
+		queue.signalItemsLocked()
+	}
+	queue.mu.Unlock()
+}
+
+// RemovePingBatchReliable removes queued copies that are already represented
+// by the durable Ping spool. The spool is authoritative across reconnects.
+func (queue *outboundQueue) RemovePingBatchReliable() {
+	queue.mu.Lock()
+	kept := queue.reliable[:0]
+	for index := range queue.reliable {
+		frame := queue.reliable[index]
+		isPingBatch := frame.messageType == websocket.TextMessage &&
+			bytes.Contains(frame.payload, []byte(`"type":"ping_result_batch"`))
+		if isPingBatch {
 			frame.payload = nil
 			continue
 		}
