@@ -24,5 +24,5 @@ concurrency surface and a dedicated commit.
 ## A2-3 Acceptance and release
 
 - [x] **A2-301 Cross-repository protocol and contract compatibility matrix**
-- [ ] **A2-302 Linux/Windows/FreeBSD builds, race, fuzz and resource soak**
+- [x] **A2-302 Linux/Windows/FreeBSD builds, race, fuzz and resource soak**
 - [ ] **A2-303 Version, push, tag and publish the Agent release**
