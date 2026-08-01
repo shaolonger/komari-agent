@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"math"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -44,6 +45,50 @@ func TestV3AggregatorPreservesPeaksSumsCounterDeltasAndCheckpoints(t *testing.T)
 	frame, _ = aggregator.Build(3, base.Add(time.Minute), false)
 	if !frame.Checkpoint {
 		t.Fatal("periodic checkpoint was not emitted")
+	}
+}
+
+// Exercise 72 hours of one-second local samples and five-second envelopes
+// without wall-clock sleeping. This catches state growth and network-budget
+// regressions deterministically on every platform.
+func TestV3SeventyTwoHourEquivalentResourceFixture(t *testing.T) {
+	const seconds = 72 * 60 * 60
+	aggregator := NewV3Aggregator(time.Minute)
+	snapshot := ReportSnapshot{
+		CPU: CPUReport{Usage: 42}, RAM: MemoryReport{Total: 8 << 30, Used: 2 << 30},
+		Network: NetworkReport{TotalUp: 1000, TotalDown: 2000},
+	}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	var networkBytes int64
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	sequence := uint64(1)
+	for second := 1; second <= seconds; second++ {
+		snapshot.Network.TotalUp += 10
+		snapshot.Network.TotalDown += 20
+		if err := aggregator.Add(snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if second%5 == 0 {
+			payload, err := EncodeReportV3(aggregator, sequence, base.Add(time.Duration(second)*time.Second), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			networkBytes += int64(len(payload))
+			sequence++
+		}
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if aggregator.PendingSamples() != 0 {
+		t.Fatalf("pending samples = %d", aggregator.PendingSamples())
+	}
+	if networkBytes > 32<<20 {
+		t.Fatalf("72h encoded network = %d bytes, budget = %d", networkBytes, 32<<20)
+	}
+	if after.HeapInuse > before.HeapInuse+16<<20 {
+		t.Fatalf("heap grew by %d bytes during logical soak", after.HeapInuse-before.HeapInuse)
 	}
 }
 

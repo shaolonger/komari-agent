@@ -6,7 +6,7 @@ concurrency surface and a dedicated commit.
 ## A2-0 Baseline
 
 - [x] **A2-001 Freeze the V2 design and clean test baseline**
-- [ ] **A2-002 Add long-run RSS/CPU/network and disconnected-spool fixtures**
+- [x] **A2-002 Add long-run RSS/CPU/network and disconnected-spool fixtures**
 
 ## A2-1 Telemetry
 

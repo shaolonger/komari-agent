@@ -181,7 +181,7 @@ func (spool *telemetrySpool) Add(sequence uint64, payload []byte, createdAt time
 	spool.pending[sequence] = spooledFrame{Sequence: sequence, CreatedAt: createdAt, Payload: owned}
 	spool.payloadBytes += len(owned)
 	spool.maximumSeen = sequence
-	return nil
+	return spool.maybeCompactLocked()
 }
 
 func (spool *telemetrySpool) Ack(through uint64) error {
@@ -203,11 +203,7 @@ func (spool *telemetrySpool) Ack(through uint64) error {
 		}
 	}
 	spool.ackRecords++
-	info, _ := spool.file.Stat()
-	if spool.ackRecords >= 64 || info != nil && info.Size() > int64(max(spoolMaximumBytes, spool.payloadBytes*2+spoolRecordHeader)) {
-		return spool.compactLocked()
-	}
-	return nil
+	return spool.maybeCompactLocked()
 }
 
 func (spool *telemetrySpool) Pending() []spooledFrame {
@@ -266,11 +262,24 @@ func (spool *telemetrySpool) dropOldestLocked() error {
 	if frame, exists := spool.pending[oldest]; exists {
 		spool.payloadBytes -= len(frame.Payload)
 		delete(spool.pending, oldest)
+		if err := spool.appendRecordLocked(spoolRecordAck, oldest, spool.now(), nil); err != nil {
+			return err
+		}
+		spool.ackRecords++
 	}
-	return spool.compactLocked()
+	return spool.maybeCompactLocked()
 }
 
 const mathMaxUint64 = ^uint64(0)
+
+func (spool *telemetrySpool) maybeCompactLocked() error {
+	info, _ := spool.file.Stat()
+	physicalLimit := int64(max(spoolMaximumBytes*2, spool.payloadBytes*2+spoolRecordHeader))
+	if spool.ackRecords >= 64 || info != nil && info.Size() > physicalLimit {
+		return spool.compactLocked()
+	}
+	return nil
+}
 
 func (spool *telemetrySpool) compactLocked() error {
 	temporary := spool.path + ".tmp"
