@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	CurrentVersion string = "v1.2.4"
+	CurrentVersion string = "v1.4.0"
 	Repo           string = "shaolonger/komari-agent"
 	BuildCommit    string = "unknown"
 )

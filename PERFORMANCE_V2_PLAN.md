@@ -1,6 +1,6 @@
 # Komari Agent Performance V2
 
-Status: implementation in progress
+Status: complete; v1.4.0 release candidate
 
 The existing sampler runtime, immutable report snapshot, telemetry v2 codec,
 bounded outbound queue and Ping target policy remain the foundation. V2 reduces

@@ -25,4 +25,4 @@ concurrency surface and a dedicated commit.
 
 - [x] **A2-301 Cross-repository protocol and contract compatibility matrix**
 - [x] **A2-302 Linux/Windows/FreeBSD builds, race, fuzz and resource soak**
-- [ ] **A2-303 Version, push, tag and publish the Agent release**
+- [x] **A2-303 Version, push, tag and publish the Agent release**
