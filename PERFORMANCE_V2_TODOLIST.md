@@ -19,7 +19,7 @@ concurrency surface and a dedicated commit.
 
 - [x] **A2-201 Implement revisioned, expiring leased Ping schedules**
 - [x] **A2-202 Batch Ping results with sequence/ACK retry semantics**
-- [ ] **A2-203 Prove all existing SSRF/capability limits on leased execution**
+- [x] **A2-203 Prove all existing SSRF/capability limits on leased execution**
 
 ## A2-3 Acceptance and release
 
