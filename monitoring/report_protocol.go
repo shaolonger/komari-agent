@@ -5,6 +5,7 @@ import (
 
 	"github.com/komari-monitor/komari-agent/diagnostics"
 	"github.com/komari-monitor/komari-agent/protocol/telemetryv2"
+	"github.com/komari-monitor/komari-agent/protocol/telemetryv3"
 )
 
 func GenerateReportV2() ([]byte, error) {
@@ -19,6 +20,10 @@ func GenerateReportV2() ([]byte, error) {
 }
 
 func encodeReportV2(snapshot *ReportSnapshot) ([]byte, error) {
+	return telemetryv2.Encode(toTelemetryV2(snapshot))
+}
+
+func toTelemetryV2(snapshot *ReportSnapshot) telemetryv2.Report {
 	wire := *snapshot
 	wire.Message = reportMessage(snapshot)
 	sanitizeReportFloats(&wire)
@@ -75,5 +80,28 @@ func encodeReportV2(snapshot *ReportSnapshot) ([]byte, error) {
 			}
 		}
 	}
-	return telemetryv2.Encode(report)
+	return report
+}
+
+// GenerateReportV3 adds the latest immutable local snapshot to an aggregate
+// envelope and emits it. The caller owns sequence/checkpoint scheduling so the
+// same aggregator can span short reconnect generations.
+func GenerateReportV3(aggregator *V3Aggregator, sequence uint64, sampledAt time.Time, forceCheckpoint bool) ([]byte, error) {
+	if aggregator == nil {
+		aggregator = NewV3Aggregator(time.Minute)
+	}
+	snapshot := &emptyReportSnapshot
+	if engine := defaultReportEngine.Load(); engine != nil {
+		snapshot = engine.store.load()
+	}
+	if err := aggregator.Add(*snapshot); err != nil {
+		return nil, err
+	}
+	frame, err := aggregator.Build(sequence, sampledAt, forceCheckpoint)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := telemetryv3.Encode(frame)
+	diagnostics.ObserveReport(sampledAt, len(encoded), err)
+	return encoded, err
 }
