@@ -90,13 +90,21 @@ func GenerateReportV3(aggregator *V3Aggregator, sequence uint64, sampledAt time.
 	if aggregator == nil {
 		aggregator = NewV3Aggregator(time.Minute)
 	}
+	if err := aggregator.Add(CurrentReportSnapshot()); err != nil {
+		return nil, err
+	}
+	return EncodeReportV3(aggregator, sequence, sampledAt, forceCheckpoint)
+}
+
+func CurrentReportSnapshot() ReportSnapshot {
 	snapshot := &emptyReportSnapshot
 	if engine := defaultReportEngine.Load(); engine != nil {
 		snapshot = engine.store.load()
 	}
-	if err := aggregator.Add(*snapshot); err != nil {
-		return nil, err
-	}
+	return cloneReportSnapshot(*snapshot)
+}
+
+func EncodeReportV3(aggregator *V3Aggregator, sequence uint64, sampledAt time.Time, forceCheckpoint bool) ([]byte, error) {
 	frame, err := aggregator.Build(sequence, sampledAt, forceCheckpoint)
 	if err != nil {
 		return nil, err

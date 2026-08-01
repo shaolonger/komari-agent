@@ -45,6 +45,7 @@ type Config struct {
 	GetIpAddrFromNic        bool    `json:"get_ip_addr_from_nic" env:"AGENT_GET_IP_ADDR_FROM_NIC"`             // 从网卡获取IP地址
 	HostProc                string  `json:"host_proc" env:"HOST_PROC"`                                         // 容器环境下宿主机/proc目录的挂载点，用于监控宿主机进程
 	ConfigFile              string  `json:"config_file" env:"AGENT_CONFIG_FILE"`                               // JSON配置文件路径
+	TelemetrySpoolPath      string  `json:"telemetry_spool_path" env:"AGENT_TELEMETRY_SPOOL_PATH"`             // v3 telemetry durable spool path
 
 }
 

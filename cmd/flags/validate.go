@@ -80,6 +80,9 @@ func (config Config) Validate() error {
 	if len(config.Endpoint) > 4096 {
 		validationErrors = append(validationErrors, errors.New("endpoint exceeds 4096 bytes"))
 	}
+	if len(config.TelemetrySpoolPath) > 4096 || strings.IndexByte(config.TelemetrySpoolPath, 0) >= 0 {
+		validationErrors = append(validationErrors, errors.New("telemetry_spool_path is invalid or exceeds 4096 bytes"))
+	}
 	if err := validatePingPolicy(config.AllowedPingTypes, config.AllowedPingTCPPorts); err != nil {
 		validationErrors = append(validationErrors, err)
 	}

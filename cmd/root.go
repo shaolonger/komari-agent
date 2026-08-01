@@ -392,6 +392,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv6, "custom-ipv6", "", "Custom IPv6 address to use")
 	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")
 	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
+	RootCmd.PersistentFlags().StringVar(&flags.TelemetrySpoolPath, "telemetry-spool-path", "", "Path to the mode-0600 telemetry v3 recovery spool")
 }
 
 func loadTokenFromFile() error {

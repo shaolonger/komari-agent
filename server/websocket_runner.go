@@ -24,6 +24,7 @@ const (
 	defaultTelemetryReadWait          = 75 * time.Second
 	defaultTelemetryWriteTimeout      = 10 * time.Second
 	defaultTelemetryDrainTimeout      = 5 * time.Second
+	defaultTelemetryV3SendInterval    = 5 * time.Second
 	defaultTelemetryReadLimit         = telemetryv2.MaxFrameSize
 	defaultStableConnectionThreshold  = time.Minute
 	maximumReconnectBackoff           = time.Minute
@@ -51,6 +52,8 @@ type telemetryGenerationConfig struct {
 	buildFrame        func(telemetryProtocol) (int, []byte, error)
 	handleMessage     func([]byte)
 	queue             *outboundQueue
+	delivery          *telemetryDelivery
+	v3SendInterval    time.Duration
 }
 
 type telemetryRunner struct {
@@ -63,6 +66,7 @@ type telemetryRunner struct {
 	stableThreshold  time.Duration
 	fullJitter       func(time.Duration) time.Duration
 	wait             func(context.Context, time.Duration) bool
+	deliveryFactory  func() (*telemetryDelivery, error)
 }
 
 func RunTelemetryWebSocket(ctx context.Context) error {
@@ -117,6 +121,13 @@ func newTelemetryRunner(endpoint string) *telemetryRunner {
 		fullJitter:       randomFullJitter,
 		wait:             waitForContext,
 		stableThreshold:  defaultStableConnectionThreshold,
+		deliveryFactory: func() (*telemetryDelivery, error) {
+			path, err := defaultTelemetrySpoolPath()
+			if err != nil {
+				return nil, err
+			}
+			return newTelemetryDelivery(path, time.Now)
+		},
 	}
 	runner.generation = telemetryGenerationConfig{
 		reportInterval:    reportInterval,
@@ -127,6 +138,7 @@ func newTelemetryRunner(endpoint string) *telemetryRunner {
 		readLimit:         defaultTelemetryReadLimit,
 		now:               time.Now,
 		buildFrame:        buildTelemetryFrame,
+		v3SendInterval:    defaultTelemetryV3SendInterval,
 	}
 	return runner
 }
@@ -135,6 +147,14 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 	queue := newOutboundQueue(ctx, defaultReliableQueueCapacity, defaultReliableWriteAttempts)
 	runner.generation.queue = queue
 	defer queue.Close(true)
+	if runner.generation.delivery == nil && runner.deliveryFactory != nil {
+		delivery, err := runner.deliveryFactory()
+		if err != nil {
+			return fmt.Errorf("open telemetry recovery spool: %w", err)
+		}
+		runner.generation.delivery = delivery
+		defer delivery.Close()
+	}
 
 	failedConnections := 0
 	shortGenerations := 0
@@ -168,6 +188,9 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 		diagnostics.RecordWebSocketConnected()
 		queue.ResetEphemeral()
 		runner.generation.handleMessage = func(message []byte) {
+			if runner.generation.delivery != nil && runner.generation.delivery.HandleControl(message) {
+				return
+			}
 			handleWebSocketMessageContext(ctx, queue, message)
 		}
 		err = runTelemetryGeneration(ctx, session, protocol, runner.generation)
@@ -207,6 +230,10 @@ func runTelemetryGeneration(
 	if err := validateTelemetryGenerationConfig(config); err != nil {
 		_ = session.Close()
 		return err
+	}
+	if protocol == telemetryProtocolV3 && config.delivery == nil {
+		_ = session.Close()
+		return errors.New("telemetry v3 requires durable delivery state")
 	}
 	// The writer intentionally outlives producer cancellation during graceful
 	// shutdown so reliable control results can drain within a fixed deadline.
@@ -322,6 +349,9 @@ func produceTelemetryReports(
 	protocol telemetryProtocol,
 	config telemetryGenerationConfig,
 ) error {
+	if protocol == telemetryProtocolV3 {
+		return produceTelemetryV3(ctx, config)
+	}
 	publish := func() error {
 		messageType, payload, encodeErr := config.buildFrame(protocol)
 		if encodeErr != nil {
@@ -341,6 +371,60 @@ func produceTelemetryReports(
 		case <-ticker.C:
 			if err := publish(); err != nil {
 				return err
+			}
+		}
+	}
+}
+
+func produceTelemetryV3(ctx context.Context, config telemetryGenerationConfig) error {
+	if err := config.delivery.enqueuePending(ctx, config.queue); err != nil {
+		return err
+	}
+	if err := config.delivery.Sample(); err != nil {
+		return err
+	}
+	flush := func(forceCheckpoint bool) error {
+		frame, err := config.delivery.Flush(config.now(), forceCheckpoint)
+		if err != nil {
+			return err
+		}
+		return config.queue.EnqueueReliable(ctx, websocket.BinaryMessage, frame.Payload)
+	}
+	if err := flush(true); err != nil {
+		return err
+	}
+	lastFlush := config.now()
+	sendInterval := config.v3SendInterval
+	if sendInterval <= 0 {
+		sendInterval = defaultTelemetryV3SendInterval
+	}
+	if sendInterval < config.reportInterval {
+		sendInterval = config.reportInterval
+	}
+	ticker := time.NewTicker(config.reportInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := config.delivery.Sample(); err != nil {
+				if !errors.Is(err, monitoring.ErrV3EnvelopeFull) {
+					return err
+				}
+				if err := flush(false); err != nil {
+					return err
+				}
+				if err := config.delivery.Sample(); err != nil {
+					return err
+				}
+				lastFlush = config.now()
+			}
+			if config.now().Sub(lastFlush) >= sendInterval {
+				if err := flush(false); err != nil {
+					return err
+				}
+				lastFlush = config.now()
 			}
 		}
 	}

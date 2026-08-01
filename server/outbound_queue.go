@@ -243,6 +243,31 @@ func (queue *outboundQueue) ResetEphemeral() {
 	queue.mu.Unlock()
 }
 
+// RemoveTelemetryV3Reliable drops only replayable v3 frames before a new
+// connection generation reloads the authoritative durable spool. JSON control
+// and Ping results remain in their original reliable FIFO order.
+func (queue *outboundQueue) RemoveTelemetryV3Reliable() {
+	queue.mu.Lock()
+	kept := queue.reliable[:0]
+	for index := range queue.reliable {
+		frame := queue.reliable[index]
+		isV3 := frame.messageType == websocket.BinaryMessage && len(frame.payload) >= 4 && string(frame.payload[:4]) == "KMR3"
+		if isV3 {
+			frame.payload = nil
+			continue
+		}
+		kept = append(kept, frame)
+	}
+	queue.reliable = kept
+	queue.reliableBurst = 0
+	queue.updateDepthLocked()
+	queue.signalSpaceLocked()
+	if queue.hasItemsLocked() {
+		queue.signalItemsLocked()
+	}
+	queue.mu.Unlock()
+}
+
 func (queue *outboundQueue) Close(dropEphemeral bool) {
 	queue.mu.Lock()
 	if queue.closed {
