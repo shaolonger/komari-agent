@@ -1,6 +1,8 @@
 module github.com/komari-monitor/komari-agent
 
-go 1.23.2
+go 1.26.0
+
+toolchain go1.26.5
 
 require (
 	github.com/UserExistsError/conpty v0.1.4
@@ -8,6 +10,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/go-ole/go-ole v1.2.6
 	github.com/gorilla/websocket v1.5.3
+	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf
 	github.com/klauspost/cpuid/v2 v2.3.0
 	github.com/prometheus-community/pro-bing v0.7.0
 	github.com/rhysd/go-github-selfupdate v1.2.3
@@ -23,7 +26,6 @@ require (
 	github.com/google/go-github/v30 v30.1.0 // indirect
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/nu7hatch/gouuid v0.0.0-20131221200532-179d4d0c4d8d // indirect

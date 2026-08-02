@@ -2,6 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -10,6 +13,24 @@ import (
 
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 )
+
+type clientHTTPStatusError struct {
+	StatusCode int
+	Status     string
+}
+
+func (statusError *clientHTTPStatusError) Error() string {
+	if statusError.Status != "" {
+		return statusError.Status
+	}
+	return fmt.Sprintf("HTTP status %d", statusError.StatusCode)
+}
+
+func isAuthenticationRejection(err error) bool {
+	var statusError *clientHTTPStatusError
+	return errors.As(err, &statusError) &&
+		(statusError.StatusCode == http.StatusUnauthorized || statusError.StatusCode == http.StatusForbidden)
+}
 
 func buildClientAPIEndpoint(path string, query url.Values) string {
 	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + path
@@ -71,6 +92,18 @@ func resetRequestBody(req *http.Request) error {
 	return nil
 }
 
-func newControlPlaneHTTPClient(timeout time.Duration) *http.Client {
-	return dnsresolver.GetHTTPClient(timeout)
+func newTelemetryHTTPClient() *http.Client {
+	return dnsresolver.GetTelemetryHTTPClient()
+}
+
+func newControlPlaneHTTPClient() *http.Client {
+	return dnsresolver.GetControlHTTPClient()
+}
+
+func requestWithTimeout(req *http.Request, timeout time.Duration) (*http.Request, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), timeout)
+	return req.WithContext(ctx), cancel
 }

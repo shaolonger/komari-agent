@@ -1,15 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/diagnostics"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
-	"github.com/komari-monitor/komari-agent/update"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
@@ -29,26 +30,24 @@ func buildCapabilityPayload() map[string]interface{} {
 }
 
 func buildBasicInfoPayload() map[string]interface{} {
-	cpu := monitoring.Cpu()
-
-	osname := monitoring.OSName()
-	kernelVersion := monitoring.KernelVersion()
+	static := defaultStaticBasicInfoCache.Get()
+	memory := monitoring.Memory()
 	ipv4, ipv6, _ := monitoring.GetIPAddress()
 
 	data := map[string]interface{}{
-		"cpu_name":       cpu.CPUName,
-		"cpu_cores":      cpu.CPUCores,
-		"arch":           cpu.CPUArchitecture,
-		"os":             osname,
-		"kernel_version": kernelVersion,
+		"cpu_name":       static.CPUName,
+		"cpu_cores":      static.CPUCores,
+		"arch":           static.Architecture,
+		"os":             static.OSName,
+		"kernel_version": static.KernelVersion,
 		"ipv4":           ipv4,
 		"ipv6":           ipv6,
-		"mem_total":      monitoring.Ram().Total,
-		"swap_total":     monitoring.Swap().Total,
+		"mem_total":      memory.RAM.Total,
+		"swap_total":     memory.Swap.Total,
 		"disk_total":     monitoring.Disk().Total,
-		"gpu_name":       monitoring.GpuName(),
-		"virtualization": monitoring.Virtualized(),
-		"version":        update.CurrentVersion,
+		"gpu_name":       static.GPUName,
+		"virtualization": static.Virtualization,
+		"version":        static.AgentVersion,
 	}
 
 	for key, value := range buildCapabilityPayload() {
@@ -59,34 +58,72 @@ func buildBasicInfoPayload() map[string]interface{} {
 }
 
 func DoUploadBasicInfoWorks() {
-	ticker := time.NewTicker(time.Duration(flags.InfoReportInterval) * time.Minute)
-	for range ticker.C {
-		err := uploadBasicInfo()
-		if err != nil {
-			log.Println("Error uploading basic info:", err)
+	_ = DoUploadBasicInfoWorksContext(context.Background())
+}
+
+func DoUploadBasicInfoWorksContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("basic info worker requires a parent context")
+	}
+	interval := time.Duration(flags.InfoReportInterval) * time.Minute
+	if interval <= 0 {
+		return errors.New("basic info interval must be positive")
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := uploadBasicInfoContext(ctx); err != nil && ctx.Err() == nil {
+				log.Println("Error uploading basic info:", err)
+			}
 		}
 	}
 }
+
 func UpdateBasicInfo() {
-	err := uploadBasicInfo()
+	err := UpdateBasicInfoContext(context.Background())
 	if err != nil {
 		log.Println("Error uploading basic info:", err)
 	} else {
 		log.Println("Basic info uploaded successfully")
 	}
 }
+
+func UpdateBasicInfoContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("basic info update requires a parent context")
+	}
+	return uploadBasicInfoContext(ctx)
+}
+
 func uploadBasicInfo() error {
+	return uploadBasicInfoContext(context.Background())
+}
+
+func uploadBasicInfoContext(ctx context.Context) error {
 	data := buildBasicInfoPayload()
 
 	// 尝试上传完整数据
-	err := tryUploadData(data)
+	err := tryUploadDataContext(ctx, data)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Retrying a reduced compatibility payload cannot fix rejected
+		// credentials. It only doubles unauthorized traffic and obscures the
+		// actionable token/proxy error.
+		if isAuthenticationRejection(err) {
+			return err
+		}
 		// 兼容 <= 1.0.2
 		delete(data, "kernel_version")
 		for key := range buildCapabilityPayload() {
 			delete(data, key)
 		}
-		err = tryUploadData(data)
+		err = tryUploadDataContext(ctx, data)
 		if err != nil {
 			return err
 		}
@@ -95,6 +132,13 @@ func uploadBasicInfo() error {
 }
 
 func tryUploadData(data map[string]interface{}) error {
+	return tryUploadDataContext(context.Background(), data)
+}
+
+func tryUploadDataContext(ctx context.Context, data map[string]interface{}) error {
+	if ctx == nil {
+		return errors.New("basic info upload requires a parent context")
+	}
 	endpoint := buildClientAPIEndpoint("/api/clients/uploadBasicInfo", nil)
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -106,22 +150,28 @@ func tryUploadData(data map[string]interface{}) error {
 		return err
 	}
 
-	client := newControlPlaneHTTPClient(30 * time.Second)
+	client := newTelemetryHTTPClient()
+	req = req.WithContext(ctx)
+	req, cancel := requestWithTimeout(req, 30*time.Second)
+	defer cancel()
 
+	requestStarted := time.Now()
 	resp, err := client.Do(req)
+	diagnostics.ObserveHTTP(requestStarted, err)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
 	if err != nil {
 		return err
 	}
-	message := string(body)
-
+	if len(body) > 64*1024 {
+		return errors.New("basic info response exceeds 64 KiB")
+	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status code: %d,%s", resp.StatusCode, message)
+		return &clientHTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 
 	return nil

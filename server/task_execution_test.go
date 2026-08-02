@@ -2,10 +2,13 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,6 +18,27 @@ type capturedTaskResult struct {
 	result     string
 	exitCode   int
 	finishedAt time.Time
+}
+
+// synchronizedBuffer is an io.Writer whose contents can be inspected while
+// background task goroutines are still emitting log records. bytes.Buffer is
+// not safe for concurrent reads and writes, which made the race test exercise
+// the test fixture instead of the production task code.
+type synchronizedBuffer struct {
+	mu  sync.RWMutex
+	buf bytes.Buffer
+}
+
+func (buffer *synchronizedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buf.Write(data)
+}
+
+func (buffer *synchronizedBuffer) String() string {
+	buffer.mu.RLock()
+	defer buffer.mu.RUnlock()
+	return buffer.buf.String()
 }
 
 func TestNewTaskReturnsCommandOutput(t *testing.T) {
@@ -61,6 +85,48 @@ func TestNewTaskTimesOutLongRunningCommand(t *testing.T) {
 	}
 	if result.finishedAt.IsZero() {
 		t.Fatal("expected finishedAt to be recorded")
+	}
+}
+
+func TestTaskCommandIsCanceledByAgentShutdownContext(t *testing.T) {
+	setTaskExecutionTimeout(t, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan struct {
+		output   string
+		exitCode int
+	}, 1)
+	go func() {
+		output, exitCode, _, _ := executeTaskCommandContext(ctx, slowTaskCommand())
+		result <- struct {
+			output   string
+			exitCode int
+		}{output: output, exitCode: exitCode}
+	}()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case got := <-result:
+		if got.exitCode == 0 || !strings.Contains(got.output, "agent is shutting down") {
+			t.Fatalf("canceled task result = (%d, %q)", got.exitCode, got.output)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("task ignored agent shutdown context")
+	}
+}
+
+func TestQueuedTaskSlotHonorsCancellation(t *testing.T) {
+	setTaskConcurrencyLimit(t, 1)
+	release := acquireTaskExecutionSlot()
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := acquireTaskExecutionSlotContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("acquireTaskExecutionSlotContext() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("queued slot cancellation exceeded bound: %s", elapsed)
 	}
 }
 
@@ -269,10 +335,10 @@ func setTaskConcurrencyLimit(t *testing.T, limit int) {
 	})
 }
 
-func captureTaskLogs(t *testing.T) (*bytes.Buffer, func()) {
+func captureTaskLogs(t *testing.T) (*synchronizedBuffer, func()) {
 	t.Helper()
 
-	logBuffer := &bytes.Buffer{}
+	logBuffer := &synchronizedBuffer{}
 	originalWriter := log.Writer()
 	originalFlags := log.Flags()
 	log.SetOutput(logBuffer)
@@ -316,7 +382,7 @@ func waitForTaskResult(t *testing.T, results <-chan capturedTaskResult) captured
 	}
 }
 
-func waitForLogSubstring(t *testing.T, logBuffer *bytes.Buffer, needle string) {
+func waitForLogSubstring(t *testing.T, logBuffer *synchronizedBuffer, needle string) {
 	t.Helper()
 
 	deadline := time.Now().Add(3 * time.Second)

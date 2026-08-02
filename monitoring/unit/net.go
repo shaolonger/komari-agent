@@ -3,6 +3,7 @@ package monitoring
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
@@ -10,18 +11,22 @@ import (
 	"github.com/shirou/gopsutil/v4/net"
 )
 
-func ConnectionsCount() (tcpCount, udpCount int, err error) {
-	tcps, err := net.Connections("tcp")
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get TCP connections: %w", err)
-	}
-	udps, err := net.Connections("udp")
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get UDP connections: %w", err)
-	}
+type networkIOSource func(bool) ([]net.IOCountersStat, error)
 
-	return len(tcps), len(udps), nil
+type networkCounter struct {
+	up   uint64
+	down uint64
 }
+
+type networkSampler struct {
+	mu         sync.Mutex
+	source     networkIOSource
+	now        func() time.Time
+	previous   map[string]networkCounter
+	previousAt time.Time
+}
+
+var defaultNetworkSampler = newNetworkSampler(net.IOCounters, time.Now)
 
 var (
 	// 预定义常见的回环和虚拟接口名称
@@ -131,6 +136,10 @@ type VnstatOutput struct {
 func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 	includeNics := parseNics(flags.IncludeNics)
 	excludeNics := parseNics(flags.ExcludeNics)
+	totalUp, totalDown, upSpeed, downSpeed, err = defaultNetworkSampler.Sample(includeNics, excludeNics)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
 
 	// 如果设置了月重置（非0），统计totalUp、totalDown
 	if flags.MonthRotate != 0 {
@@ -139,81 +148,76 @@ func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 		resetDay := uint64(utils.GetLastResetDate(flags.MonthRotate, time.Now()).Unix())
 		nicStatics, err := netstatic.GetTotalTrafficBetween(resetDay, now)
 		if err != nil {
-			// 如果netstatic失败，回退到原来的方法，并返回额外的错误信息
-			fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fallbackErr := getNetworkSpeedFallback(includeNics, excludeNics)
-			if fallbackErr != nil {
-				return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to call GetTotalTrafficBetween: %v; fallback error: %w", err, fallbackErr)
-			}
-			return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to call GetTotalTrafficBetween: %w", err)
+			return totalUp, totalDown, upSpeed, downSpeed, fmt.Errorf("failed to call GetTotalTrafficBetween: %w", err)
 		}
 
+		monthlyUp, monthlyDown := uint64(0), uint64(0)
 		for interfaceName, stats := range nicStatics {
 			if shouldInclude(interfaceName, includeNics, excludeNics) {
-				totalUp += stats.Tx
-				totalDown += stats.Rx
+				monthlyUp += stats.Tx
+				monthlyDown += stats.Rx
 			}
 		}
-
-		// 对于实时速度，仍然使用gopsutil方法
-		_, _, upSpeed, downSpeed, err = getNetworkSpeedFallback(includeNics, excludeNics)
-		if err != nil {
-			return totalUp, totalDown, 0, 0, err
-		}
-
-		return totalUp, totalDown, upSpeed, downSpeed, nil
+		return monthlyUp, monthlyDown, upSpeed, downSpeed, nil
 	}
 
-	// 如果没有设置月重置，使用原来的方法
-	return getNetworkSpeedFallback(includeNics, excludeNics)
+	return totalUp, totalDown, upSpeed, downSpeed, nil
 }
 
 func getNetworkSpeedFallback(includeNics, excludeNics map[string]struct{}) (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
-	// 获取第一次网络IO计数器
-	ioCounters1, err := net.IOCounters(true)
+	return defaultNetworkSampler.Sample(includeNics, excludeNics)
+}
+
+func newNetworkSampler(source networkIOSource, now func() time.Time) *networkSampler {
+	return &networkSampler{
+		source:   source,
+		now:      now,
+		previous: make(map[string]networkCounter),
+	}
+}
+
+func (sampler *networkSampler) Sample(includeNics, excludeNics map[string]struct{}) (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
+	counters, err := sampler.source(true)
 	if err != nil {
 		return 0, 0, 0, 0, fmt.Errorf("failed to get network IO counters: %w", err)
 	}
-
-	if len(ioCounters1) == 0 {
+	if len(counters) == 0 {
 		return 0, 0, 0, 0, fmt.Errorf("no network interfaces found")
 	}
+	now := sampler.now()
+	current := make(map[string]networkCounter, len(counters))
+	for _, counter := range counters {
+		if !shouldInclude(counter.Name, includeNics, excludeNics) {
+			continue
+		}
+		current[counter.Name] = networkCounter{up: counter.BytesSent, down: counter.BytesRecv}
+		totalUp += counter.BytesSent
+		totalDown += counter.BytesRecv
+	}
 
-	// 统计第一次所有非回环接口的流量
-	var totalUp1, totalDown1 uint64
-	for _, interfaceStats := range ioCounters1 {
-		if shouldInclude(interfaceStats.Name, includeNics, excludeNics) {
-			totalUp1 += interfaceStats.BytesSent
-			totalDown1 += interfaceStats.BytesRecv
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+	if sampler.previousAt.IsZero() || !now.After(sampler.previousAt) {
+		sampler.previous = current
+		sampler.previousAt = now
+		return totalUp, totalDown, 0, 0, nil
+	}
+	elapsedSeconds := now.Sub(sampler.previousAt).Seconds()
+	for name, value := range current {
+		previous, exists := sampler.previous[name]
+		if !exists {
+			continue
+		}
+		if value.up >= previous.up {
+			upSpeed += uint64(float64(value.up-previous.up) / elapsedSeconds)
+		}
+		if value.down >= previous.down {
+			downSpeed += uint64(float64(value.down-previous.down) / elapsedSeconds)
 		}
 	}
-
-	// 等待1秒
-	time.Sleep(time.Second)
-
-	// 获取第二次网络IO计数器
-	ioCounters2, err := net.IOCounters(true)
-	if err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("failed to get network IO counters: %w", err)
-	}
-
-	if len(ioCounters2) == 0 {
-		return 0, 0, 0, 0, fmt.Errorf("no network interfaces found")
-	}
-
-	// 统计第二次所有非回环接口的流量
-	var totalUp2, totalDown2 uint64
-	for _, interfaceStats := range ioCounters2 {
-		if shouldInclude(interfaceStats.Name, includeNics, excludeNics) {
-			totalUp2 += interfaceStats.BytesSent
-			totalDown2 += interfaceStats.BytesRecv
-		}
-	}
-
-	// 计算速度 (每秒的速率)
-	upSpeed = totalUp2 - totalUp1
-	downSpeed = totalDown2 - totalDown1
-
-	return totalUp2, totalDown2, upSpeed, downSpeed, nil
+	sampler.previous = current
+	sampler.previousAt = now
+	return totalUp, totalDown, upSpeed, downSpeed, nil
 }
 
 func parseNics(nics string) map[string]struct{} {

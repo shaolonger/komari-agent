@@ -1,10 +1,19 @@
 package monitoring
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/shirou/gopsutil/v4/disk"
+)
+
+const (
+	defaultDiskTopologyInterval = 5 * time.Minute
+	defaultDiskSampleInterval   = 30 * time.Second
 )
 
 type DiskInfo struct {
@@ -12,78 +21,332 @@ type DiskInfo struct {
 	Used  uint64 `json:"used"`
 }
 
+type diskPartitionsSource func(bool) ([]disk.PartitionStat, error)
+type diskUsageSource func(string) (*disk.UsageStat, error)
+
+type diskGroup struct {
+	id         string
+	candidates []disk.PartitionStat
+}
+
+type diskTopology struct {
+	groups []diskGroup
+	list   []string
+}
+
+type diskSampler struct {
+	mu               sync.Mutex
+	partitions       diskPartitionsSource
+	usage            diskUsageSource
+	now              func() time.Time
+	topologyInterval time.Duration
+	sampleInterval   time.Duration
+
+	topology        diskTopology
+	topologyConfig  string
+	topologyAt      time.Time
+	topologyChecked bool
+	topologyLoaded  bool
+	topologyErr     error
+
+	sample        DiskInfo
+	sampleAt      time.Time
+	sampleChecked bool
+	groupSamples  map[string]DiskInfo
+}
+
+var defaultDiskSampler = newDiskSampler(
+	disk.Partitions,
+	disk.Usage,
+	time.Now,
+	defaultDiskTopologyInterval,
+	defaultDiskSampleInterval,
+)
+
+func newDiskSampler(
+	partitions diskPartitionsSource,
+	usage diskUsageSource,
+	now func() time.Time,
+	topologyInterval time.Duration,
+	sampleInterval time.Duration,
+) *diskSampler {
+	return &diskSampler{
+		partitions:       partitions,
+		usage:            usage,
+		now:              now,
+		topologyInterval: topologyInterval,
+		sampleInterval:   sampleInterval,
+		groupSamples:     make(map[string]DiskInfo),
+	}
+}
+
+// Disk returns a low-frequency capacity snapshot. Partition topology is
+// refreshed separately from usage so a fast report loop does not repeatedly
+// enumerate every mount and allocate the complete partition list.
 func Disk() DiskInfo {
-	diskinfo := DiskInfo{}
-	// 获取所有分区，使用 true 避免物理磁盘被 gopsutil 错误排除
-	usage, err := disk.Partitions(true)
-	if err != nil {
-		diskinfo.Total = 0
-		diskinfo.Used = 0
+	result, _ := defaultDiskSampler.Sample(flags.IncludeMountpoints, false, false)
+	return result
+}
+
+// RefreshDiskTopology is the event hook for mount/config changes. It refreshes
+// topology and capacity immediately while preserving the last valid value when
+// a transient platform query fails.
+func RefreshDiskTopology() DiskInfo {
+	result, _ := defaultDiskSampler.Sample(flags.IncludeMountpoints, true, true)
+	return result
+}
+
+func (sampler *diskSampler) Sample(includeMountpoints string, forceTopology, forceUsage bool) (DiskInfo, error) {
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+
+	now := sampler.now()
+	topologyChanged, topologyErr := sampler.ensureTopologyLocked(now, includeMountpoints, forceTopology)
+	if !sampler.topologyLoaded {
+		return sampler.sample, topologyErr
+	}
+
+	usageDue := !sampler.sampleChecked || forceUsage || topologyChanged ||
+		durationElapsed(now, sampler.sampleAt, sampler.sampleInterval)
+	if !usageDue {
+		return sampler.sample, topologyErr
+	}
+
+	result, groupSamples, usageErr := sampleDiskTopology(sampler.topology, sampler.groupSamples, sampler.usage)
+	sampler.sampleAt = now
+	sampler.sampleChecked = true
+	if len(sampler.topology.groups) == 0 || len(groupSamples) > 0 {
+		sampler.sample = result
+		sampler.groupSamples = groupSamples
+	}
+	return sampler.sample, errors.Join(topologyErr, usageErr)
+}
+
+func (sampler *diskSampler) List(includeMountpoints string, forceTopology bool) ([]string, error) {
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+
+	_, err := sampler.ensureTopologyLocked(sampler.now(), includeMountpoints, forceTopology)
+	if !sampler.topologyLoaded {
+		return nil, err
+	}
+	return append([]string(nil), sampler.topology.list...), err
+}
+
+func (sampler *diskSampler) ensureTopologyLocked(now time.Time, rawInclude string, force bool) (bool, error) {
+	includeMounts := parseIncludeMountpoints(rawInclude)
+	config := strings.Join(includeMounts, "\x00")
+	if len(includeMounts) == 0 {
+		config = "<auto>"
+	}
+	due := !sampler.topologyChecked || force || config != sampler.topologyConfig ||
+		durationElapsed(now, sampler.topologyAt, sampler.topologyInterval)
+	if !due {
+		return false, sampler.topologyErr
+	}
+
+	sampler.topologyChecked = true
+	sampler.topologyAt = now
+	sampler.topologyConfig = config
+
+	var (
+		topology diskTopology
+		err      error
+	)
+	if len(includeMounts) > 0 {
+		topology = buildIncludedDiskTopology(includeMounts)
 	} else {
-		// 如果指定了自定义挂载点，只统计指定的挂载点
-		if flags.IncludeMountpoints != "" {
-			includeMounts := strings.Split(flags.IncludeMountpoints, ";")
-			for _, mountpoint := range includeMounts {
-				mountpoint = strings.TrimSpace(mountpoint)
-				if mountpoint != "" {
-					u, err := disk.Usage(mountpoint)
-					if err != nil {
-						continue
-					} else {
-						diskinfo.Total += u.Total
-						diskinfo.Used += u.Used
-					}
-				}
+		var partitions []disk.PartitionStat
+		partitions, err = sampler.partitions(true)
+		if err == nil {
+			topology = buildAutomaticDiskTopology(partitions)
+		}
+	}
+	if err != nil {
+		sampler.topologyErr = err
+		return false, err
+	}
+
+	changed := !sampler.topologyLoaded || !equalDiskTopology(sampler.topology, topology)
+	sampler.topology = topology
+	sampler.topologyLoaded = true
+	sampler.topologyErr = nil
+	return changed, nil
+}
+
+func durationElapsed(now, previous time.Time, interval time.Duration) bool {
+	if interval <= 0 || previous.IsZero() || now.Before(previous) {
+		return true
+	}
+	return now.Sub(previous) >= interval
+}
+
+func parseIncludeMountpoints(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	result := make([]string, 0, strings.Count(raw, ";")+1)
+	for _, value := range strings.Split(raw, ";") {
+		mountpoint := strings.TrimSpace(value)
+		if mountpoint == "" {
+			continue
+		}
+		if _, exists := seen[mountpoint]; exists {
+			continue
+		}
+		seen[mountpoint] = struct{}{}
+		result = append(result, mountpoint)
+	}
+	return result
+}
+
+func buildIncludedDiskTopology(mountpoints []string) diskTopology {
+	topology := diskTopology{
+		groups: make([]diskGroup, 0, len(mountpoints)),
+		list:   append([]string(nil), mountpoints...),
+	}
+	for _, mountpoint := range mountpoints {
+		topology.groups = append(topology.groups, diskGroup{
+			id: "include:" + mountpoint,
+			candidates: []disk.PartitionStat{{
+				Mountpoint: mountpoint,
+			}},
+		})
+	}
+	return topology
+}
+
+func buildAutomaticDiskTopology(partitions []disk.PartitionStat) diskTopology {
+	topology := diskTopology{}
+	groupIndexes := make(map[string]int)
+	for _, partition := range partitions {
+		if !isPhysicalDisk(partition) {
+			continue
+		}
+		id := diskDeviceID(partition)
+		if index, exists := groupIndexes[id]; exists {
+			topology.groups[index].candidates = append(topology.groups[index].candidates, partition)
+			continue
+		}
+		groupIndexes[id] = len(topology.groups)
+		topology.groups = append(topology.groups, diskGroup{id: id, candidates: []disk.PartitionStat{partition}})
+	}
+
+	topology.list = make([]string, 0, len(topology.groups))
+	for _, group := range topology.groups {
+		partition := group.candidates[0]
+		for _, candidate := range group.candidates[1:] {
+			if len(candidate.Mountpoint) < len(partition.Mountpoint) ||
+				(len(candidate.Mountpoint) == len(partition.Mountpoint) && candidate.Mountpoint < partition.Mountpoint) {
+				partition = candidate
 			}
-		} else {
-			// 使用默认逻辑，排除临时文件系统和网络驱动器
-			deviceMap := make(map[string]*disk.UsageStat)
+		}
+		topology.list = append(topology.list, fmt.Sprintf("%s (%s)", partition.Mountpoint, partition.Fstype))
+	}
+	sort.Strings(topology.list)
+	return topology
+}
 
-			for _, part := range usage {
-				if isPhysicalDisk(part) {
-					u, err := disk.Usage(part.Mountpoint)
-					if err != nil {
-						continue
-					}
+func diskDeviceID(partition disk.PartitionStat) string {
+	deviceID := partition.Device
+	if strings.EqualFold(partition.Fstype, "zfs") {
+		if index := strings.Index(deviceID, "/"); index >= 0 {
+			deviceID = deviceID[:index]
+		}
+	}
+	if deviceID == "" {
+		return "mount:" + partition.Mountpoint
+	}
+	return "device:" + deviceID
+}
 
-					deviceID := part.Device
-					// ZFS去重: 基于 pool 名称 (例如 pool/dataset -> pool)
-					if strings.ToLower(part.Fstype) == "zfs" {
-						if idx := strings.Index(deviceID, "/"); idx != -1 {
-							deviceID = deviceID[:idx]
-						}
-					}
-
-					// 如果该设备已存在，且当前挂载点的 Total 更大，则替换（处理 quota 等情况）
-					// 否则保留现有的（通常我们希望统计物理 pool 的总量）
-					if existing, ok := deviceMap[deviceID]; ok {
-						if u.Total > existing.Total {
-							deviceMap[deviceID] = u
-						}
-					} else {
-						deviceMap[deviceID] = u
-					}
-				}
-			}
-
-			for _, u := range deviceMap {
-				diskinfo.Total += u.Total
-				diskinfo.Used += u.Used
+func equalDiskTopology(left, right diskTopology) bool {
+	if len(left.groups) != len(right.groups) {
+		return false
+	}
+	for index := range left.groups {
+		leftGroup, rightGroup := left.groups[index], right.groups[index]
+		if leftGroup.id != rightGroup.id || len(leftGroup.candidates) != len(rightGroup.candidates) {
+			return false
+		}
+		for candidateIndex := range leftGroup.candidates {
+			leftCandidate := leftGroup.candidates[candidateIndex]
+			rightCandidate := rightGroup.candidates[candidateIndex]
+			if leftCandidate.Device != rightCandidate.Device ||
+				leftCandidate.Mountpoint != rightCandidate.Mountpoint ||
+				leftCandidate.Fstype != rightCandidate.Fstype {
+				return false
 			}
 		}
 	}
-	return diskinfo
+	return true
 }
 
-// isPhysicalDisk 判断分区是否为物理磁盘
+func sampleDiskTopology(
+	topology diskTopology,
+	previous map[string]DiskInfo,
+	usage diskUsageSource,
+) (DiskInfo, map[string]DiskInfo, error) {
+	groupSamples := make(map[string]DiskInfo, len(topology.groups))
+	failedQueries := 0
+	var firstErr error
+
+	for _, group := range topology.groups {
+		var best DiskInfo
+		found := false
+		for _, candidate := range group.candidates {
+			stat, err := usage(candidate.Mountpoint)
+			if err != nil {
+				failedQueries++
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if stat == nil {
+				failedQueries++
+				if firstErr == nil {
+					firstErr = errors.New("disk usage source returned nil")
+				}
+				continue
+			}
+			if !found || stat.Total > best.Total {
+				best = DiskInfo{Total: stat.Total, Used: min(stat.Used, stat.Total)}
+				found = true
+			}
+		}
+		if found {
+			groupSamples[group.id] = best
+		} else if stale, exists := previous[group.id]; exists {
+			groupSamples[group.id] = stale
+		}
+	}
+
+	var result DiskInfo
+	for _, value := range groupSamples {
+		result.Total = saturatingAdd(result.Total, value.Total)
+		result.Used = saturatingAdd(result.Used, value.Used)
+	}
+	if result.Used > result.Total {
+		result.Used = result.Total
+	}
+	if failedQueries > 0 {
+		return result, groupSamples, fmt.Errorf("%d disk usage queries failed: %w", failedQueries, firstErr)
+	}
+	return result, groupSamples, nil
+}
+
+// isPhysicalDisk reports whether a partition should contribute to the default
+// local capacity total.
 func isPhysicalDisk(part disk.PartitionStat) bool {
-	// 对于LXC等基于loop的根文件系统，始终包含根挂载点
+	// LXC and similar environments may expose a loop/overlay root; always keep
+	// the root mount because it is the capacity visible to the container.
 	if part.Mountpoint == "/" {
 		return true
 	}
 	mountpoint := strings.ToLower(part.Mountpoint)
-	// 排除挂载点
-	var mountpointsToExcludePerfix = []string{
+	mountpointsToExcludePrefix := []string{
 		"/tmp",
 		"/var/tmp",
 		"/dev",
@@ -94,110 +357,40 @@ func isPhysicalDisk(part disk.PartitionStat) bool {
 		"/sys",
 		"/sys/fs/cgroup",
 		"/etc/resolv.conf",
-		"/etc/host", // /etc/hosts,/etc/hostname
+		"/etc/host",
 		"/nix/store",
 	}
-	for _, mp := range mountpointsToExcludePerfix {
-		if mountpoint == mp || strings.HasPrefix(mountpoint, mp) {
+	for _, mountpointPrefix := range mountpointsToExcludePrefix {
+		if mountpoint == mountpointPrefix || strings.HasPrefix(mountpoint, mountpointPrefix) {
 			return false
 		}
 	}
 
 	fstype := strings.ToLower(part.Fstype)
-
-	// 针对 Linux autofs：排除自动挂载的 trigger，真实文件系统会作为单独分区出现不会被排除。
-	// 将 autofs 视为“非物理磁盘”可以避免重复统计容量。
 	if fstype == "autofs" && !strings.HasPrefix(part.Device, "/dev/") {
 		return false
 	}
-
-	// 针对 Linux 下通过 ntfs-3g 挂载的 NTFS 分区 (fuseblk)，这是实际物理磁盘，不应排除
 	if fstype == "fuseblk" {
 		return true
 	}
-	var fstypeToExclude = []string{
-		"tmpfs",
-		"devtmpfs",
-		"udev",
-		"nfs",
-		"cifs",
-		"smb",
-		"vboxsf",
-		"9p",
-		"fuse",
-		"overlay",
-		"proc",
-		"devpts",
-		"sysfs",
-		"cgroup",
-		"mqueue",
-		"hugetlbfs",
-		"debugfs",
-		"binfmt_misc",
-		"securityfs",
+	fstypesToExclude := []string{
+		"tmpfs", "devtmpfs", "udev", "nfs", "cifs", "smb", "vboxsf", "9p", "fuse",
+		"overlay", "proc", "devpts", "sysfs", "cgroup", "mqueue", "hugetlbfs", "debugfs",
+		"binfmt_misc", "securityfs",
 	}
-	for _, fs := range fstypeToExclude {
-		if fstype == fs || strings.HasPrefix(fstype, fs) {
+	for _, excludedFSType := range fstypesToExclude {
+		if fstype == excludedFSType || strings.HasPrefix(fstype, excludedFSType) {
 			return false
 		}
 	}
-	// Windows 网络驱动器通常是映射盘符，但不容易通过fstype判断
-	// 可以通过opts判断，Windows网络驱动通常有相关选项
-	optsStr := strings.ToLower(strings.Join(part.Opts, ","))
-	if strings.Contains(optsStr, "remote") || strings.Contains(optsStr, "network") {
+
+	opts := strings.ToLower(strings.Join(part.Opts, ","))
+	if strings.Contains(opts, "remote") || strings.Contains(opts, "network") {
 		return false
 	}
-
-	// 虚拟内存
-	if strings.HasPrefix(part.Device, "/dev/loop") {
-		return false
-	}
-
-	return true
+	return !strings.HasPrefix(part.Device, "/dev/loop")
 }
 
 func DiskList() ([]string, error) {
-	diskList := []string{}
-	if flags.IncludeMountpoints != "" {
-		includeMounts := strings.Split(flags.IncludeMountpoints, ";")
-		for _, mountpoint := range includeMounts {
-			mountpoint = strings.TrimSpace(mountpoint)
-			if mountpoint != "" {
-				diskList = append(diskList, mountpoint)
-			}
-		}
-	} else {
-		usage, err := disk.Partitions(true)
-		if err != nil {
-			return nil, err
-		}
-
-		// 同一物理设备只保留路径最短的根挂载点
-		deviceMap := make(map[string]disk.PartitionStat)
-		for _, part := range usage {
-			if isPhysicalDisk(part) {
-				deviceID := part.Device
-				// ZFS去重: 基于 pool 名称
-				if strings.ToLower(part.Fstype) == "zfs" {
-					if idx := strings.Index(deviceID, "/"); idx != -1 {
-						deviceID = deviceID[:idx]
-					}
-				}
-
-				if existing, ok := deviceMap[deviceID]; ok {
-					// 优先保留路径更短的挂载点 (e.g., /volume1 优于 /volume1/@appdata/...)
-					if len(part.Mountpoint) < len(existing.Mountpoint) {
-						deviceMap[deviceID] = part
-					}
-				} else {
-					deviceMap[deviceID] = part
-				}
-			}
-		}
-
-		for _, part := range deviceMap {
-			diskList = append(diskList, fmt.Sprintf("%s (%s)", part.Mountpoint, part.Fstype))
-		}
-	}
-	return diskList, nil
+	return defaultDiskSampler.List(flags.IncludeMountpoints, false)
 }

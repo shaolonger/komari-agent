@@ -38,12 +38,14 @@ type Config struct {
 	MemoryReportRawUsed     bool    `json:"memory_report_raw_used" env:"AGENT_MEMORY_REPORT_RAW_USED"`         // 使用原始内存使用情况报告
 	CustomDNS               string  `json:"custom_dns" env:"AGENT_CUSTOM_DNS"`                                 // 使用的自定义DNS服务器
 	EnableGPU               bool    `json:"enable_gpu" env:"AGENT_ENABLE_GPU"`                                 // 启用详细GPU监控
+	EnableDiagnostics       bool    `json:"enable_diagnostics" env:"AGENT_ENABLE_DIAGNOSTICS"`                 // 启用低开销性能诊断汇总
 	ShowWarning             bool    `json:"show_warning" env:"AGENT_SHOW_WARNING"`                             // Windows 上显示安全警告，作为子进程运行一次
 	CustomIpv4              string  `json:"custom_ipv4" env:"AGENT_CUSTOM_IPV4"`                               // 自定义 IPv4 地址
 	CustomIpv6              string  `json:"custom_ipv6" env:"AGENT_CUSTOM_IPV6"`                               // 自定义 IPv6 地址
 	GetIpAddrFromNic        bool    `json:"get_ip_addr_from_nic" env:"AGENT_GET_IP_ADDR_FROM_NIC"`             // 从网卡获取IP地址
 	HostProc                string  `json:"host_proc" env:"HOST_PROC"`                                         // 容器环境下宿主机/proc目录的挂载点，用于监控宿主机进程
 	ConfigFile              string  `json:"config_file" env:"AGENT_CONFIG_FILE"`                               // JSON配置文件路径
+	TelemetrySpoolPath      string  `json:"telemetry_spool_path" env:"AGENT_TELEMETRY_SPOOL_PATH"`             // v3 telemetry durable spool path
 
 }
 
@@ -87,4 +89,11 @@ var GlobalConfig = &Config{
 	PingMinIntervalMillis: 500,
 	MaxControlRequests:    10,
 	ControlRequestWindow:  10,
+	Interval:              1,
+	MaxRetries:            3,
+	ReconnectInterval:     5,
+	InfoReportInterval:    5,
+	MaxTerminalSessions:   1,
+	TerminalIdleTimeout:   300,
+	TerminalMaxDuration:   1800,
 }

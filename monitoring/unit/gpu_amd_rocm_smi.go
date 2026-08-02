@@ -4,10 +4,13 @@ package monitoring
 // Original License: MIT
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -35,6 +38,114 @@ type ROCmGPUInfo struct {
 	VRAMTotalMemory     string `json:"VRAM Total Memory (B)"`
 	VRAMTotalUsedMemory string `json:"VRAM Total Used Memory (B)"`
 	TemperatureJunction string `json:"Temperature (Sensor junction) (C)"`
+	TemperatureEdge     string `json:"Temperature (Sensor edge) (C)"`
+	TemperatureMemory   string `json:"Temperature (Sensor memory) (C)"`
+}
+
+type amdGPUProvider struct {
+	path   string
+	runner gpuCommandRunner
+}
+
+func (provider *amdGPUProvider) Static(ctx context.Context) ([]gpuDeviceStatic, error) {
+	output, err := provider.runner.Run(ctx, provider.path,
+		"--showproductname", "--showmeminfo", "vram", "--json")
+	if err != nil {
+		return nil, err
+	}
+	data, keys, err := parseROCmResponse(output)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]gpuDeviceStatic, 0, len(keys))
+	for _, key := range keys {
+		card := data[key]
+		memoryTotal, err := parseAMDMemoryBytes(card.VRAMTotalMemory)
+		if err != nil {
+			return nil, errors.New("invalid AMD total memory")
+		}
+		result = append(result, gpuDeviceStatic{id: key, name: strings.TrimSpace(card.CardSeries), memoryTotal: memoryTotal})
+	}
+	return result, validateGPUStatic(result)
+}
+
+func (provider *amdGPUProvider) Dynamic(ctx context.Context, metadata []gpuDeviceStatic) ([]DetailedGPUInfo, error) {
+	output, err := provider.runner.Run(ctx, provider.path,
+		"--showuse", "--showmeminfo", "vram", "--showtemp", "--json")
+	if err != nil {
+		return nil, err
+	}
+	return parseAMDDynamicResponse(output, metadata)
+}
+
+func parseAMDDynamicResponse(output []byte, metadata []gpuDeviceStatic) ([]DetailedGPUInfo, error) {
+	data, keys, err := parseROCmResponse(output)
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) != len(metadata) {
+		return nil, errGPUTopologyChanged
+	}
+	result := make([]DetailedGPUInfo, 0, len(metadata))
+	for _, device := range metadata {
+		card, exists := data[device.id]
+		if !exists {
+			return nil, errGPUTopologyChanged
+		}
+		memoryUsed, err := parseAMDMemoryBytes(card.VRAMTotalUsedMemory)
+		if err != nil {
+			return nil, errors.New("invalid AMD used memory")
+		}
+		utilization, err := parseAMDPercentage(card.GPUUsage)
+		if err != nil {
+			return nil, errors.New("invalid AMD utilization")
+		}
+		temperature, err := parseAMDTemperature(firstNonEmpty(card.TemperatureJunction, card.TemperatureEdge, card.TemperatureMemory))
+		if err != nil {
+			return nil, errors.New("invalid AMD temperature")
+		}
+		result = append(result, DetailedGPUInfo{
+			Name:        device.name,
+			MemoryTotal: device.memoryTotal,
+			MemoryUsed:  memoryUsed,
+			Utilization: utilization,
+			Temperature: temperature,
+		})
+	}
+	return result, validateDetailedGPUInfo(result)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseROCmResponse(output []byte) (ROCmResponse, []string, error) {
+	if err := validateGPUCommandOutput(output); err != nil {
+		return nil, nil, err
+	}
+	var data ROCmResponse
+	if err := json.Unmarshal(output, &data); err != nil {
+		return nil, nil, err
+	}
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		if strings.HasPrefix(key, "card") {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return nil, nil, errors.New("ROCm response contained no devices")
+	}
+	if len(keys) > maximumGPUCount {
+		return nil, nil, errors.New("ROCm response exceeded the GPU limit")
+	}
+	return data, keys, nil
 }
 
 func (rsmi *ROCmSMI) GatherModel() ([]string, error) {
@@ -51,6 +162,12 @@ func (rsmi *ROCmSMI) GatherDetailedInfo() ([]AMDGPUInfo, error) {
 }
 
 func (rsmi *ROCmSMI) Start() error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultGPUCommandTimeout)
+	defer cancel()
+	return rsmi.StartContext(ctx)
+}
+
+func (rsmi *ROCmSMI) StartContext(ctx context.Context) error {
 	if _, err := os.Stat(rsmi.BinPath); os.IsNotExist(err) {
 		binPath, err := exec.LookPath("rocm-smi")
 		if err != nil {
@@ -59,68 +176,41 @@ func (rsmi *ROCmSMI) Start() error {
 		rsmi.BinPath = binPath
 	}
 
-	rsmi.data = rsmi.pollROCmSMI()
+	output, err := (execGPUCommandRunner{}).Run(ctx, rsmi.BinPath, "--showallinfo", "--json")
+	if err != nil {
+		return err
+	}
+	rsmi.data = output
 	return nil
 }
 
-func (rsmi *ROCmSMI) pollROCmSMI() []byte {
-	cmd := exec.Command(rsmi.BinPath, "--showallinfo", "--json")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil
-	}
-	return output
-}
-
 func (rsmi *ROCmSMI) gatherModel() ([]string, error) {
-	var data map[string]interface{}
-	var models []string
-
-	if err := json.Unmarshal(rsmi.data, &data); err != nil {
+	data, keys, err := parseROCmResponse(rsmi.data)
+	if err != nil {
 		return nil, err
 	}
-
-	// 解析JSON结构获取GPU型号
-	for key, value := range data {
-		if strings.HasPrefix(key, "card") {
-			if cardData, ok := value.(map[string]interface{}); ok {
-				if name, exists := cardData["Card series"]; exists {
-					if nameStr, ok := name.(string); ok && nameStr != "" {
-						models = append(models, nameStr)
-					}
-				}
-			}
+	models := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if name := strings.TrimSpace(data[key].CardSeries); name != "" {
+			models = append(models, name)
 		}
 	}
-
 	return models, nil
 }
 
 func (rsmi *ROCmSMI) gatherUsage() ([]float64, error) {
-	var data map[string]interface{}
-	var usageList []float64
-
-	if err := json.Unmarshal(rsmi.data, &data); err != nil {
+	data, keys, err := parseROCmResponse(rsmi.data)
+	if err != nil {
 		return nil, err
 	}
-
-	// 解析JSON结构获取GPU使用率
-	for key, value := range data {
-		if strings.HasPrefix(key, "card") {
-			if cardData, ok := value.(map[string]interface{}); ok {
-				usage := 0.0
-				if utilizationData, exists := cardData["GPU use (%)"]; exists {
-					if utilizationStr, ok := utilizationData.(string); ok {
-						if parsed, err := parseAMDPercentage(utilizationStr); err == nil {
-							usage = parsed
-						}
-					}
-				}
-				usageList = append(usageList, usage)
-			}
+	usageList := make([]float64, 0, len(keys))
+	for _, key := range keys {
+		usage, err := parseAMDPercentage(data[key].GPUUsage)
+		if err != nil {
+			usage = 0
 		}
+		usageList = append(usageList, usage)
 	}
-
 	return usageList, nil
 }
 
@@ -129,66 +219,22 @@ func (rsmi *ROCmSMI) gatherDetailedInfo() ([]AMDGPUInfo, error) {
 		return nil, errors.New("no data available")
 	}
 
-	var data map[string]interface{}
-	var gpuInfos []AMDGPUInfo
-
-	if err := json.Unmarshal(rsmi.data, &data); err != nil {
+	data, keys, err := parseROCmResponse(rsmi.data)
+	if err != nil {
 		return nil, err
 	}
-
-	// 解析每个GPU卡的详细信息
-	for key, value := range data {
-		if strings.HasPrefix(key, "card") {
-			if cardData, ok := value.(map[string]interface{}); ok {
-				gpuInfo := AMDGPUInfo{}
-
-				// 获取GPU名称
-				if name, exists := cardData["Card series"]; exists {
-					if nameStr, ok := name.(string); ok {
-						gpuInfo.Name = nameStr
-					}
-				}
-
-				// 获取使用率
-				if utilizationData, exists := cardData["GPU use (%)"]; exists {
-					if utilizationStr, ok := utilizationData.(string); ok {
-						if usage, err := parseAMDPercentage(utilizationStr); err == nil {
-							gpuInfo.Utilization = usage
-						}
-					}
-				}
-
-				// 获取显存信息
-				if memUsedData, exists := cardData["VRAM Total Used Memory (B)"]; exists {
-					if memUsedStr, ok := memUsedData.(string); ok {
-						if memUsed, err := parseAMDMemoryBytes(memUsedStr); err == nil {
-							gpuInfo.MemoryUsed = memUsed
-						}
-					}
-				}
-
-				if memTotalData, exists := cardData["VRAM Total Memory (B)"]; exists {
-					if memTotalStr, ok := memTotalData.(string); ok {
-						if memTotal, err := parseAMDMemoryBytes(memTotalStr); err == nil {
-							gpuInfo.MemoryTotal = memTotal
-						}
-					}
-				}
-
-				// 获取温度信息
-				if tempData, exists := cardData["Temperature (Sensor junction) (C)"]; exists {
-					if tempStr, ok := tempData.(string); ok {
-						if temp, err := parseAMDTemperature(tempStr); err == nil {
-							gpuInfo.Temperature = temp
-						}
-					}
-				}
-
-				gpuInfos = append(gpuInfos, gpuInfo)
-			}
-		}
+	gpuInfos := make([]AMDGPUInfo, 0, len(keys))
+	for _, key := range keys {
+		card := data[key]
+		usage, _ := parseAMDPercentage(card.GPUUsage)
+		memoryUsed, _ := parseAMDMemoryBytes(card.VRAMTotalUsedMemory)
+		memoryTotal, _ := parseAMDMemoryBytes(card.VRAMTotalMemory)
+		temperature, _ := parseAMDTemperature(firstNonEmpty(card.TemperatureJunction, card.TemperatureEdge, card.TemperatureMemory))
+		gpuInfos = append(gpuInfos, AMDGPUInfo{
+			Name: card.CardSeries, MemoryTotal: memoryTotal, MemoryUsed: memoryUsed,
+			Utilization: usage, Temperature: temperature,
+		})
 	}
-
 	return gpuInfos, nil
 }
 
@@ -237,10 +283,13 @@ func parseAMDTemperature(value string) (uint64, error) {
 		return 0, nil
 	}
 
-	result, err := strconv.ParseUint(cleaned, 10, 64)
+	result, err := strconv.ParseFloat(cleaned, 64)
 	if err != nil {
 		return 0, err
 	}
+	if math.IsNaN(result) || math.IsInf(result, 0) || result < 0 || result > 1000 {
+		return 0, errors.New("invalid AMD temperature")
+	}
 
-	return result, nil
+	return uint64(math.Round(result)), nil
 }

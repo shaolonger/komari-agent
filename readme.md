@@ -17,6 +17,7 @@
 - 如果显式开启 ping 探测，默认只允许 `tcp,http,icmp` 三类探测、只允许 `80,443,8443` 端口、默认拒绝私有/环回/链路本地等敏感地址，并且会施加 `--max-concurrent-pings` 与 `--ping-min-interval-millis` 限制；只有在业务明确需要时才通过对应参数放宽。
 - agent 还会对控制请求施加基础速率限制，默认 10 秒窗口内最多接受 10 个控制请求；如确有需要，可用 `--max-control-requests` 和 `--control-request-window` 调整。
 - 如果需要保留任务命令审计，使用显式开关 `--audit-task-commands`，并假定日志只用于受控审计面，因为命令文本会经过脱敏后落日志。
+- 性能诊断默认关闭；排障时可临时启用 `--enable-diagnostics` 或 `enable_diagnostics=true`。它每 5 分钟只输出采样耗时、错误计数、队列深度和连接计数等聚合值，不输出 token、命令、目标地址、endpoint 或 IP。完成排障后应关闭，避免不必要的日志量。
 - 如环境不允许自动更新，使用 `--disable-auto-update`，改为人工审批并配合下面的离线校验流程执行升级。
 - 容器部署时仅挂载只读配置文件和必要运行目录，不要把宿主机上不相关的敏感路径暴露给容器。
 

@@ -1,10 +1,11 @@
 package update
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -14,9 +15,14 @@ import (
 )
 
 var (
-	CurrentVersion string = "v1.2.4"
+	CurrentVersion string = "v1.4.0"
 	Repo           string = "shaolonger/komari-agent"
+	BuildCommit    string = "unknown"
 )
+
+const RestartExitCode = 42
+
+var ErrUpdateInstalled = errors.New("agent update installed; restart required")
 
 const (
 	updateStageVersionParse = "current version parsing"
@@ -28,11 +34,9 @@ type selfUpdater interface {
 	UpdateSelf(current semver.Version, slug string) (*selfupdate.Release, error)
 }
 
-var newSelfUpdater = func(config selfupdate.Config) (selfUpdater, error) {
-	return selfupdate.NewUpdater(config)
+var newSelfUpdater = func(ctx context.Context, config selfupdate.Config, client *http.Client) (selfUpdater, error) {
+	return newVerifiedSelfUpdater(ctx, config, client)
 }
-
-var exitProcess = os.Exit
 
 func failUpdate(stage string) error {
 	log.Printf("Auto-update failed during %s; keeping current version", stage)
@@ -53,9 +57,27 @@ func needUpdate(current, latest semver.Version) bool {
 }
 
 func DoUpdateWorks() {
-	ticker_ := time.NewTicker(time.Duration(6) * time.Hour)
-	for range ticker_.C {
-		CheckAndUpdate()
+	_ = DoUpdateWorksContext(context.Background())
+}
+
+func DoUpdateWorksContext(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("update worker requires a parent context")
+	}
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := CheckAndUpdateContext(ctx); err != nil && ctx.Err() == nil {
+				if errors.Is(err, ErrUpdateInstalled) {
+					return err
+				}
+				log.Printf("Periodic auto-update failed: %v", err)
+			}
+		}
 	}
 }
 
@@ -67,6 +89,13 @@ func selfUpdateConfig() selfupdate.Config {
 
 // 检查更新并执行自动更新
 func CheckAndUpdate() error {
+	return CheckAndUpdateContext(context.Background())
+}
+
+func CheckAndUpdateContext(ctx context.Context) error {
+	if ctx == nil {
+		return failUpdate(updateStageUpdaterInit)
+	}
 	log.Println("Checking update...")
 	// Parse current version
 	currentSemVer, err := parseVersion(CurrentVersion)
@@ -74,14 +103,10 @@ func CheckAndUpdate() error {
 		return failUpdate(updateStageVersionParse)
 	}
 
-	previousDefaultClient := http.DefaultClient
-	http.DefaultClient = dnsresolver.GetVerifiedHTTPClient(60 * time.Second)
-	defer func() {
-		http.DefaultClient = previousDefaultClient
-	}()
-
 	config := selfUpdateConfig()
-	updater, err := newSelfUpdater(config)
+	updateContext, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	updater, err := newSelfUpdater(updateContext, config, dnsresolver.GetUpdateHTTPClient())
 	if err != nil {
 		return failUpdate(updateStageUpdaterInit)
 	}
@@ -110,6 +135,5 @@ func CheckAndUpdate() error {
 	// 	return fmt.Errorf("failed to restart program: %v", err)
 	// }
 	log.Printf("Successfully updated to version %s\n", latest.Version)
-	exitProcess(42)
-	return nil
+	return ErrUpdateInstalled
 }

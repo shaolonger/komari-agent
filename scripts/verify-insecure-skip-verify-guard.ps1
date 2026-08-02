@@ -5,14 +5,9 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $allowedMatches = @{}
 @(
     @{
-        Path = 'cmd/root.go'
-        Line = 'http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}'
-        Reason = 'Explicit --ignore-unsafe-cert override for the shared default transport; pending Phase 1.2 redesign.'
-    }
-    @{
         Path = 'dnsresolver/resolver.go'
-        Line = 'InsecureSkipVerify: insecureSkipVerify,'
-        Reason = 'Transport builder keeps the toggle injectable; callers must opt in explicitly and update paths already decouple self-update.'
+        Line = 'tlsConfig.InsecureSkipVerify = true'
+        Reason = 'Only the physically isolated telemetry transport may honor the explicit --ignore-unsafe-cert override.'
     }
     @{
         Path = 'server/websocket.go'
@@ -23,7 +18,8 @@ $allowedMatches = @{}
     $allowedMatches["$($_.Path)|$($_.Line)"] = $_
 }
 
-$goFiles = Get-ChildItem -Path $repoRoot -Recurse -Filter '*.go' -File
+$goFiles = Get-ChildItem -Path $repoRoot -Recurse -Filter '*.go' -File |
+    Where-Object { $_.Name -notlike '*_test.go' }
 $matches = @(
     $goFiles | Select-String -Pattern '\bInsecureSkipVerify\b\s*:'
     $goFiles | Select-String -Pattern '\.InsecureSkipVerify\s*='

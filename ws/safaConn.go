@@ -25,6 +25,15 @@ func (sc *SafeConn) WriteMessage(messageType int, data []byte) error {
 	return sc.conn.WriteMessage(messageType, data)
 }
 
+func (sc *SafeConn) WriteMessageWithDeadline(deadline time.Time, messageType int, data []byte) error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if err := sc.conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	return sc.conn.WriteMessage(messageType, data)
+}
+
 func (sc *SafeConn) WriteJSON(v interface{}) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -32,8 +41,9 @@ func (sc *SafeConn) WriteJSON(v interface{}) error {
 }
 
 func (sc *SafeConn) Close() error {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
+	// gorilla/websocket permits Close concurrently with all other methods. Do
+	// not wait on the writer mutex: Close is also how a cancelled generation
+	// interrupts an in-flight read/write before its bounded deadline.
 	return sc.conn.Close()
 }
 func (sc *SafeConn) ReadMessage() (int, []byte, error) {
@@ -50,6 +60,12 @@ func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 	// sc.mu.Lock()
 	// defer sc.mu.Unlock()
 	return sc.conn.SetReadDeadline(t)
+}
+func (sc *SafeConn) SetReadLimit(limit int64) {
+	sc.conn.SetReadLimit(limit)
+}
+func (sc *SafeConn) SetPongHandler(handler func(string) error) {
+	sc.conn.SetPongHandler(handler)
 }
 func (sc *SafeConn) GetConn() *websocket.Conn {
 	sc.mu.Lock()

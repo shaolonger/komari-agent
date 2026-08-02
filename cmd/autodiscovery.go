@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -205,8 +206,10 @@ func registerWithAutoDiscovery() error {
 	}
 
 	// 发送请求
-	client := dnsresolver.GetHTTPClient(30 * time.Second)
-	resp, err := client.Do(req)
+	client := dnsresolver.GetTelemetryHTTPClient()
+	requestContext, cancel := context.WithTimeout(req.Context(), 30*time.Second)
+	defer cancel()
+	resp, err := client.Do(req.WithContext(requestContext))
 	if err != nil {
 		return fmt.Errorf("failed to send register request: %v", err)
 	}

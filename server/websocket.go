@@ -1,21 +1,25 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
+	"github.com/komari-monitor/komari-agent/protocol/telemetryv2"
+	"github.com/komari-monitor/komari-agent/protocol/telemetryv3"
 	"github.com/komari-monitor/komari-agent/terminal"
 	"github.com/komari-monitor/komari-agent/utils"
-	"github.com/komari-monitor/komari-agent/ws"
 )
 
 const defaultMaxControlRequests = 10
@@ -35,6 +39,7 @@ type controlPlaneMessage struct {
 	PingTaskID uint   `json:"ping_task_id,omitempty"`
 	PingType   string `json:"ping_type,omitempty"`
 	PingTarget string `json:"ping_target,omitempty"`
+	pingLeaseControl
 }
 
 func controlRequestLimit() int {
@@ -90,136 +95,124 @@ func shouldRateLimitControlRequest(message controlPlaneMessage) bool {
 }
 
 func EstablishWebSocketConnection() {
-	websocketEndpoint := buildClientWebSocketEndpoint("/api/clients/report", nil)
-
-	// 转换中文域名为 ASCII 兼容编码
-	if convertedEndpoint, err := utils.ConvertIDNToASCII(websocketEndpoint); err == nil {
-		websocketEndpoint = convertedEndpoint
-	} else {
-		log.Printf("Warning: Failed to convert WebSocket IDN to ASCII: %v", err)
-	}
-
-	var conn *ws.SafeConn
-	defer func() {
-		if conn != nil {
-			conn.Close()
-		}
-	}()
-	var err error
-	var interval float64
-	if flags.Interval <= 1 {
-		interval = 1
-	} else {
-		interval = flags.Interval - 1
-	}
-
-	dataTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
-	defer dataTicker.Stop()
-
-	heartbeatTicker := time.NewTicker(30 * time.Second)
-	defer heartbeatTicker.Stop()
-
-	for {
-		select {
-		case <-dataTicker.C:
-			if conn == nil {
-				log.Println("Attempting to connect to WebSocket...")
-				retry := 0
-				for retry <= flags.MaxRetries {
-					if retry > 0 {
-						log.Println("Retrying websocket connection, attempt:", retry)
-					}
-					conn, err = connectWebSocket(websocketEndpoint)
-					if err == nil {
-						log.Println("WebSocket connected")
-						go handleWebSocketMessages(conn, make(chan struct{}))
-						break
-					} else {
-						log.Println("Failed to connect to WebSocket:", err)
-					}
-					retry++
-					time.Sleep(time.Duration(flags.ReconnectInterval) * time.Second)
-				}
-
-				if retry > flags.MaxRetries {
-					log.Println("Max retries reached.")
-					return
-				}
-			}
-
-			data := monitoring.GenerateReport()
-			err = conn.WriteMessage(websocket.TextMessage, data)
-			if err != nil {
-				log.Println("Failed to send WebSocket message:", err)
-				conn.Close()
-				conn = nil // Mark connection as dead
-				continue
-			}
-		case <-heartbeatTicker.C:
-			if conn != nil {
-				err := conn.WriteMessage(websocket.PingMessage, nil)
-				if err != nil {
-					log.Println("Failed to send heartbeat:", err)
-					conn.Close()
-					conn = nil // Mark connection as dead
-				}
-			}
-		}
+	if err := RunTelemetryWebSocket(context.Background()); err != nil {
+		log.Printf("Telemetry WebSocket stopped: %v", err)
 	}
 }
 
-func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
-	dialer := newWSDialer()
+type telemetryProtocol uint8
 
-	headers := newWSHeaders()
+const (
+	telemetryProtocolV1 telemetryProtocol = iota + 1
+	telemetryProtocolV2
+	telemetryProtocolV3
+)
 
-	conn, resp, err := dialer.Dial(websocketEndpoint, headers)
-	if err != nil {
-		if resp != nil && resp.StatusCode != 101 {
-			return nil, fmt.Errorf("%s", resp.Status)
-		}
-		return nil, err
+func negotiatedTelemetryProtocol(selected string) (telemetryProtocol, error) {
+	switch selected {
+	case "", telemetryv2.LegacySubprotocol:
+		return telemetryProtocolV1, nil
+	case telemetryv2.Subprotocol:
+		return telemetryProtocolV2, nil
+	case telemetryv3.Subprotocol:
+		return telemetryProtocolV3, nil
+	default:
+		return telemetryProtocolV1, fmt.Errorf("server selected unsupported telemetry subprotocol %q", selected)
 	}
-
-	return ws.NewSafeConn(conn), nil
 }
 
-func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
-	defer close(done)
-	for {
-		_, message_raw, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("WebSocket read error:", err)
-			return
-		}
-		var message controlPlaneMessage
-		err = json.Unmarshal(message_raw, &message)
-		if err != nil {
-			log.Println("Bad ws message:", err)
-			continue
-		}
-		if shouldRateLimitControlRequest(message) {
-			if !allowControlRequest(time.Now()) {
-				log.Printf("Remote control request rejected due to rate limiting: message=%s", message.Message)
-				if message.Message == "exec" && message.ExecTaskID != "" {
-					taskResultUploader(message.ExecTaskID, "Remote control request rejected due to rate limiting.", -1, time.Now())
-				}
-				continue
-			}
-		}
+func buildTelemetryFrame(protocol telemetryProtocol) (messageType int, payload []byte, encodeErr error) {
+	return buildTelemetryFrameWithV3(protocol, monitoring.GenerateReport, monitoring.GenerateReportV2, func() ([]byte, error) {
+		return monitoring.GenerateReportV3(defaultV3Aggregator, defaultV3Sequence.Add(1), time.Now(), false)
+	})
+}
 
-		if isTerminalControlMessage(message) {
-			go establishTerminalConnection(message.TerminalId)
-			continue
+var (
+	defaultV3Sequence   atomic.Uint64
+	defaultV3Aggregator = monitoring.NewV3Aggregator(time.Minute)
+)
+
+func buildTelemetryFrameWith(
+	protocol telemetryProtocol,
+	generateV1 func() []byte,
+	generateV2 func() ([]byte, error),
+) (messageType int, payload []byte, encodeErr error) {
+	return buildTelemetryFrameWithV3(protocol, generateV1, generateV2, func() ([]byte, error) {
+		return nil, errors.New("telemetry v3 generator is not configured")
+	})
+}
+
+func buildTelemetryFrameWithV3(
+	protocol telemetryProtocol,
+	generateV1 func() []byte,
+	generateV2 func() ([]byte, error),
+	generateV3 func() ([]byte, error),
+) (messageType int, payload []byte, encodeErr error) {
+	if protocol == telemetryProtocolV3 {
+		payload, encodeErr = generateV3()
+		if encodeErr == nil {
+			return websocket.BinaryMessage, payload, nil
 		}
-		if isExecControlMessage(message) {
-			go NewTask(message.ExecTaskID, message.ExecCommand)
-			continue
+	}
+	if protocol == telemetryProtocolV2 {
+		payload, encodeErr = generateV2()
+		if encodeErr == nil {
+			return websocket.BinaryMessage, payload, nil
 		}
-		if isPingControlMessage(message) {
-			go NewPingTask(conn, message.PingTaskID, message.PingType, message.PingTarget)
-			continue
+	}
+	if protocol == telemetryProtocolV3 {
+		fallback, fallbackErr := generateV2()
+		if fallbackErr == nil {
+			return websocket.BinaryMessage, fallback, encodeErr
 		}
+		encodeErr = errors.Join(encodeErr, fallbackErr)
+	}
+	return websocket.TextMessage, generateV1(), encodeErr
+}
+
+func handleWebSocketMessage(resultWriter pingResultWriter, messageRaw []byte) {
+	handleWebSocketMessageContext(context.Background(), resultWriter, messageRaw)
+}
+
+func handleWebSocketMessageContext(ctx context.Context, resultWriter pingResultWriter, messageRaw []byte) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if activePingLease.HandleControl(messageRaw) {
+		return
+	}
+	var message controlPlaneMessage
+	if err := json.Unmarshal(messageRaw, &message); err != nil {
+		log.Println("Bad ws message:", err)
+		return
+	}
+	if message.Message == "ping_lease" {
+		if err := activePingLease.Apply(ctx, resultWriter, message.pingLeaseControl); err != nil {
+			log.Printf("Rejected Ping lease: %v", err)
+		}
+		return
+	}
+	if shouldRateLimitControlRequest(message) && !allowControlRequest(time.Now()) {
+		log.Printf("Remote control request rejected due to rate limiting: message=%s", message.Message)
+		if message.Message == "exec" && message.ExecTaskID != "" {
+			activeControlWorkers.launch(func() {
+				uploadTaskResultContext(ctx, message.ExecTaskID, "Remote control request rejected due to rate limiting.", -1, time.Now())
+			})
+		}
+		return
+	}
+	if isTerminalControlMessage(message) {
+		activeControlWorkers.launch(func() { establishTerminalConnectionContext(ctx, message.TerminalId) })
+		return
+	}
+	if isExecControlMessage(message) {
+		activeControlWorkers.launch(func() { NewTaskContext(ctx, message.ExecTaskID, message.ExecCommand) })
+		return
+	}
+	if isPingControlMessage(message) {
+		activeControlWorkers.launch(func() {
+			NewPingTaskContext(ctx, resultWriter, message.PingTaskID, message.PingType, message.PingTarget)
+		})
 	}
 }
 
@@ -227,6 +220,10 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 
 // establishTerminalConnection 建立终端连接并使用terminal包处理终端操作
 func establishTerminalConnection(id string) {
+	establishTerminalConnectionContext(context.Background(), id)
+}
+
+func establishTerminalConnectionContext(ctx context.Context, id string) {
 	endpoint := buildClientWebSocketEndpoint("/api/clients/terminal", url.Values{"id": []string{id}})
 
 	// 转换中文域名为 ASCII 兼容编码
@@ -241,14 +238,14 @@ func establishTerminalConnection(id string) {
 
 	headers := newWSHeaders()
 
-	conn, _, err := dialer.Dial(endpoint, headers)
+	conn, _, err := dialer.DialContext(ctx, endpoint, headers)
 	if err != nil {
 		log.Println("Failed to establish terminal connection:", err)
 		return
 	}
 
 	// 启动终端
-	terminal.StartTerminal(conn)
+	terminal.StartTerminalContext(ctx, conn)
 	if conn != nil {
 		conn.Close()
 	}
@@ -265,6 +262,18 @@ func newWSDialer() *websocket.Dialer {
 		d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return d
+}
+
+func newTelemetryWSDialer() *websocket.Dialer {
+	dialer := newWSDialer()
+	dialer.Subprotocols = []string{telemetryv3.Subprotocol, telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
+	return dialer
+}
+
+func newTelemetryWSDialerWithoutV3() *websocket.Dialer {
+	dialer := newWSDialer()
+	dialer.Subprotocols = []string{telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
+	return dialer
 }
 
 // newWSHeaders 统一构造 WS 请求头（含 Cloudflare Access 头）

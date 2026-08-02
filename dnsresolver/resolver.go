@@ -3,11 +3,11 @@ package dnsresolver
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,14 +36,33 @@ var (
 
 	preferV4Once sync.Once
 	hasIPv4      bool
+	dnsConfigMu  sync.RWMutex
+
+	httpClientsMu sync.Mutex
+	httpClients   = make(map[httpClientPolicy]*http.Client, 4)
 )
+
+type httpClientPolicy uint8
+
+const (
+	httpTelemetryStrict httpClientPolicy = iota + 1
+	httpTelemetryInsecure
+	httpControlStrict
+	httpUpdateStrict
+)
+
+const defaultHTTPDialTimeout = 15 * time.Second
 
 // SetCustomDNSServer 设置自定义DNS服务器
 func SetCustomDNSServer(dnsServer string) {
 	if dnsServer == "" {
 		return
 	}
+	dnsConfigMu.Lock()
 	CustomDNSServer = normalizeDNSServer(dnsServer)
+	dnsConfigMu.Unlock()
+	resolvedHostCache.Clear()
+	resetHTTPClients()
 }
 
 // normalizeDNSServer 将输入的 DNS 服务器字符串规范化为 host:port 形式：
@@ -68,6 +87,8 @@ func normalizeDNSServer(s string) string {
 
 // getCurrentDNSServer 获取当前要使用的DNS服务器
 func getCurrentDNSServer() string {
+	dnsConfigMu.RLock()
+	defer dnsConfigMu.RUnlock()
 	if CustomDNSServer != "" {
 		return CustomDNSServer
 	}
@@ -123,42 +144,11 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			ips, err := customResolver.LookupHost(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			// 根据本机是否具备 IPv4 动态排序
-			preferIPv4 := preferIPv4First()
-			sort.SliceStable(ips, func(i, j int) bool {
-				ip1 := net.ParseIP(ips[i])
-				ip2 := net.ParseIP(ips[j])
-				if ip1 == nil || ip2 == nil {
-					return false
-				}
-				if preferIPv4 {
-					return ip1.To4() != nil && ip2.To4() == nil
-				}
-				// IPv6 优先
-				return ip1.To4() == nil && ip2.To4() != nil
-			})
-			for _, ip := range ips {
-				dialer := &net.Dialer{
-					Timeout:   timeout,
-					KeepAlive: 30 * time.Second,
-					DualStack: true,
-				}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+			return dialWithResolver(ctx, network, addr, timeout, customResolver)
 		},
-		MaxIdleConns:          10,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   8,
+		MaxConnsPerHost:       16,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -167,22 +157,80 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 	}
 }
 
-func newHTTPClient(timeout time.Duration, insecureSkipVerify bool) *http.Client {
-	return &http.Client{
-		Transport: buildTransport(timeout, &tls.Config{
-			InsecureSkipVerify: insecureSkipVerify,
-		}),
-		Timeout: timeout,
-	}
-}
-
+// GetHTTPClient is retained for compatibility. New code should use the
+// policy-specific accessors below; the timeout is enforced per request.
 func GetHTTPClient(timeout time.Duration) *http.Client {
-	return newHTTPClient(timeout, flags.IgnoreUnsafeCert)
+	_ = timeout
+	return GetTelemetryHTTPClient()
 }
 
-// GetVerifiedHTTPClient returns an HTTP client that always validates TLS certificates.
+// GetVerifiedHTTPClient is retained for compatibility and maps to the isolated
+// update client, which always validates TLS certificates.
 func GetVerifiedHTTPClient(timeout time.Duration) *http.Client {
-	return newHTTPClient(timeout, false)
+	_ = timeout
+	return GetUpdateHTTPClient()
+}
+
+// GetTelemetryHTTPClient returns the long-lived panel telemetry client. The
+// unsafe variant has its own Transport and is selected only by explicit flag.
+func GetTelemetryHTTPClient() *http.Client {
+	if flags.IgnoreUnsafeCert {
+		return getPolicyHTTPClient(httpTelemetryInsecure)
+	}
+	return getPolicyHTTPClient(httpTelemetryStrict)
+}
+
+// GetControlHTTPClient returns a physically isolated, certificate-verifying
+// client for privileged control results.
+func GetControlHTTPClient() *http.Client {
+	return getPolicyHTTPClient(httpControlStrict)
+}
+
+// GetUpdateHTTPClient returns a physically isolated, certificate-verifying
+// client for release metadata, binaries and checksum assets.
+func GetUpdateHTTPClient() *http.Client {
+	return getPolicyHTTPClient(httpUpdateStrict)
+}
+
+func getPolicyHTTPClient(policy httpClientPolicy) *http.Client {
+	httpClientsMu.Lock()
+	defer httpClientsMu.Unlock()
+	if client := httpClients[policy]; client != nil {
+		return client
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if policy == httpTelemetryInsecure {
+		tlsConfig.InsecureSkipVerify = true
+	}
+	client := &http.Client{
+		Transport: buildTransport(defaultHTTPDialTimeout, tlsConfig),
+	}
+	if policy == httpUpdateStrict {
+		client.CheckRedirect = requireSecureUpdateRedirect
+	}
+	httpClients[policy] = client
+	return client
+}
+
+func requireSecureUpdateRedirect(request *http.Request, via []*http.Request) error {
+	if request.URL.Scheme != "https" {
+		return errors.New("update redirect requires HTTPS")
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 update redirects")
+	}
+	return nil
+}
+
+func resetHTTPClients() {
+	httpClientsMu.Lock()
+	defer httpClientsMu.Unlock()
+	for _, client := range httpClients {
+		if transport, ok := client.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
+	}
+	httpClients = make(map[httpClientPolicy]*http.Client, 4)
 }
 
 // GetNetDialer 返回一个使用自定义DNS解析器的网络拨号器
@@ -200,8 +248,9 @@ func GetNetDialer(timeout time.Duration) *net.Dialer {
 
 // GetDialContext 返回一个自定义 DialContext：
 // - 使用自定义解析器解析主机名
-// - 优先尝试 IPv4，再尝试 IPv6
-// - 逐个 IP 进行连接尝试，直到成功或全部失败
+// - 使用有界 DNS 缓存并在配置变化时失效
+// - 以 Happy Eyeballs 方式竞速 IPv4/IPv6
+// - 解析与所有连接尝试共享同一个总超时预算
 func GetDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -210,48 +259,7 @@ func GetDialContext(timeout time.Duration) func(ctx context.Context, network, ad
 	resolver := GetCustomResolver()
 
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
-
-		// 为解析设置一个带超时的子 context，避免整体拨号过快超时
-		lookupCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-
-		ips, err := resolver.LookupHost(lookupCtx, host)
-		if err != nil {
-			return nil, err
-		}
-
-		// 根据本机是否具备 IPv4 动态排序
-		preferIPv4 := preferIPv4First()
-		sort.SliceStable(ips, func(i, j int) bool {
-			ip1 := net.ParseIP(ips[i])
-			ip2 := net.ParseIP(ips[j])
-			if ip1 == nil || ip2 == nil {
-				return false
-			}
-			if preferIPv4 {
-				return ip1.To4() != nil && ip2.To4() == nil
-			}
-			// IPv6 优先
-			return ip1.To4() == nil && ip2.To4() != nil
-		})
-
-		// 逐个 IP 尝试连接
-		for _, ip := range ips {
-			d := &net.Dialer{
-				Timeout:   timeout,
-				KeepAlive: 30 * time.Second,
-				DualStack: true,
-			}
-			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
-			if err == nil {
-				return c, nil
-			}
-		}
-		return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+		return dialWithResolver(ctx, network, addr, timeout, resolver)
 	}
 }
 

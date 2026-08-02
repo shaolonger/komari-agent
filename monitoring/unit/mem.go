@@ -3,6 +3,7 @@ package monitoring
 import (
 	"bufio"
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -34,6 +35,11 @@ type ProcMemInfo struct {
 	Zswapped     uint64
 }
 
+type MemoryInfo struct {
+	RAM  RamInfo `json:"ram"`
+	Swap RamInfo `json:"swap"`
+}
+
 // readProcMeminfo reads /proc/meminfo and returns a filled ProcMemInfo struct
 func ReadProcMeminfo() (*ProcMemInfo, error) {
 	file, err := os.Open("/proc/meminfo")
@@ -42,8 +48,12 @@ func ReadProcMeminfo() (*ProcMemInfo, error) {
 	}
 	defer file.Close()
 
+	return readProcMeminfo(file)
+}
+
+func readProcMeminfo(reader io.Reader) (*ProcMemInfo, error) {
 	info := &ProcMemInfo{}
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Fields(line)
@@ -94,26 +104,7 @@ func GetMemHtopLike() RamInfo {
 	if runtime.GOOS == "linux" {
 		info, err := ReadProcMeminfo()
 		if err == nil && info.MemTotal > 0 {
-			raminfo.Total = info.MemTotal
-			// htop logic:
-			// usedDiff = free + cached + sreclaimable + buffers
-			usedDiff := info.MemFree + info.Cached + info.SReclaimable + info.Buffers
-
-			if info.MemTotal >= usedDiff {
-				raminfo.Used = info.MemTotal - usedDiff
-			} else {
-				raminfo.Used = info.MemTotal - info.MemFree
-			}
-			raminfo.Used += info.Shmem
-
-			//if info.Zswap > 0 || info.Zswapped > 0 {
-			//	if raminfo.Used > info.Zswap {
-			//		raminfo.Used -= info.Zswap
-			//	} else {
-			//		raminfo.Used = 0
-			//	}
-			//}
-			return raminfo
+			return ramFromProc(info, false)
 		}
 	}
 	return raminfo
@@ -210,22 +201,24 @@ func Ram() RamInfo {
 	return GetMemGopsutil()
 }
 
+// Memory returns RAM and swap from one /proc/meminfo read on Linux. Other
+// platforms use their native gopsutil sources once per memory snapshot.
+func Memory() MemoryInfo {
+	if runtime.GOOS == "linux" {
+		if info, err := ReadProcMeminfo(); err == nil && info.MemTotal > 0 {
+			return memoryFromProc(info, pkg_flags.GlobalConfig.MemoryIncludeCache)
+		}
+	}
+	return MemoryInfo{RAM: Ram(), Swap: Swap()}
+}
+
 func Swap() RamInfo {
 	swapinfo := RamInfo{}
 
 	if runtime.GOOS == "linux" {
 		info, err := ReadProcMeminfo()
 		if err == nil {
-			swapinfo.Total = info.SwapTotal
-			// used = total - free - cached
-			// Check for underflow
-			usedDeductions := info.SwapFree + info.SwapCached
-			if info.SwapTotal >= usedDeductions {
-				swapinfo.Used = info.SwapTotal - usedDeductions
-			} else {
-				swapinfo.Used = info.SwapTotal - info.SwapFree
-			}
-			return swapinfo
+			return swapFromProc(info)
 		}
 	}
 
@@ -236,4 +229,57 @@ func Swap() RamInfo {
 	swapinfo.Total = s.Total
 	swapinfo.Used = s.Used
 	return swapinfo
+}
+
+func ramFromProc(info *ProcMemInfo, includeCache bool) RamInfo {
+	raminfo := RamInfo{Total: info.MemTotal, Mode: "htoplike"}
+	if includeCache {
+		raminfo.Mode = "includeCache"
+		if info.MemTotal >= info.MemFree {
+			raminfo.Used = info.MemTotal - info.MemFree
+		}
+		return raminfo
+	}
+	usedDeductions := saturatingAdd(info.MemFree, info.Cached, info.SReclaimable, info.Buffers)
+	if info.MemTotal >= usedDeductions {
+		raminfo.Used = info.MemTotal - usedDeductions
+	} else if info.MemTotal >= info.MemFree {
+		raminfo.Used = info.MemTotal - info.MemFree
+	}
+	if ^uint64(0)-raminfo.Used >= info.Shmem {
+		raminfo.Used += info.Shmem
+	}
+	if raminfo.Used > raminfo.Total {
+		raminfo.Used = raminfo.Total
+	}
+	return raminfo
+}
+
+func swapFromProc(info *ProcMemInfo) RamInfo {
+	swapinfo := RamInfo{Total: info.SwapTotal}
+	usedDeductions := saturatingAdd(info.SwapFree, info.SwapCached)
+	if info.SwapTotal >= usedDeductions {
+		swapinfo.Used = info.SwapTotal - usedDeductions
+	} else if info.SwapTotal >= info.SwapFree {
+		swapinfo.Used = info.SwapTotal - info.SwapFree
+	}
+	return swapinfo
+}
+
+func memoryFromProc(info *ProcMemInfo, includeCache bool) MemoryInfo {
+	return MemoryInfo{
+		RAM:  ramFromProc(info, includeCache),
+		Swap: swapFromProc(info),
+	}
+}
+
+func saturatingAdd(values ...uint64) uint64 {
+	var total uint64
+	for _, value := range values {
+		if ^uint64(0)-total < value {
+			return ^uint64(0)
+		}
+		total += value
+	}
+	return total
 }

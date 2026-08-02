@@ -11,7 +11,8 @@ extract_function() {
     sed -n "/^${function_name}() {/,/^}/p" "$INSTALLER_PATH" | tr -d '\r'
 }
 
-source <(
+function_file="$(mktemp)"
+{
     extract_function "sha256_file"
     printf '\n'
     extract_function "verify_release_checksum"
@@ -19,7 +20,10 @@ source <(
     extract_function "normalize_trusted_github_proxy"
     printf '\n'
     extract_function "stage_installer_for_sudo"
-)
+} > "$function_file"
+# shellcheck source=/dev/null
+source "$function_file"
+rm -f "$function_file"
 
 tmp_dir="$(mktemp -d)"
 cleanup() {

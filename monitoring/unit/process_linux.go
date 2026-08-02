@@ -1,39 +1,41 @@
-//go:build !windows
-// +build !windows
+//go:build linux
 
 package monitoring
 
 import (
+	"io"
 	"os"
-	"strconv"
 )
 
-// ProcessCount returns the number of running processes
-func ProcessCount() (count int) {
-	return processCountLinux()
+func processCountPlatform() (int, error) {
+	return countProcessesInDirectory(procRoot(flags.HostProc))
 }
 
-// processCountLinux counts processes by reading /proc directory
-func processCountLinux() (count int) {
-	procDir := "/proc"
-
-	if flags.HostProc != "" {
-		if info, err := os.Stat(flags.HostProc); err == nil && info.IsDir() {
-			procDir = flags.HostProc
+func procRoot(configured string) string {
+	if configured != "" {
+		if info, err := os.Stat(configured); err == nil && info.IsDir() {
+			return configured
 		}
 	}
+	return "/proc"
+}
 
-	entries, err := os.ReadDir(procDir)
+func countProcessesInDirectory(directory string) (int, error) {
+	handle, err := os.Open(directory)
 	if err != nil {
-		return 0
+		return 0, err
 	}
+	defer handle.Close()
 
-	for _, entry := range entries {
-		if _, err := strconv.ParseInt(entry.Name(), 10, 64); err == nil {
-			//if _, err := filepath.ParseInt(entry.Name(), 10, 64); err == nil {
-			count++
+	count := 0
+	for {
+		names, readErr := handle.Readdirnames(256)
+		count += countDecimalPIDs(names)
+		if readErr == io.EOF {
+			return count, nil
+		}
+		if readErr != nil {
+			return 0, readErr
 		}
 	}
-
-	return count
 }

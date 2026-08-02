@@ -29,6 +29,37 @@ function Assert-BashScriptParses {
     }
 }
 
+function Assert-WorkflowActionsPinned {
+    param([string]$WorkflowDirectory)
+
+    $violations = @()
+    foreach ($workflow in Get-ChildItem -Path $WorkflowDirectory -Filter '*.yml' -File) {
+        $lineNumber = 0
+        foreach ($line in Get-Content -Path $workflow.FullName) {
+            $lineNumber++
+            if ($line -notmatch '^\s*uses:\s+(?<action>[^\s#]+)') {
+                continue
+            }
+            $action = $Matches.action
+            if ($action.StartsWith('./')) {
+                continue
+            }
+            $separator = $action.LastIndexOf('@')
+            if ($separator -lt 1) {
+                $violations += "$($workflow.Name):${lineNumber}: missing action ref"
+                continue
+            }
+            $reference = $action.Substring($separator + 1)
+            if ($reference -notmatch '^[0-9a-f]{40}$') {
+                $violations += "$($workflow.Name):${lineNumber}: $action"
+            }
+        }
+    }
+    if ($violations.Count -gt 0) {
+        throw "GitHub Actions must be pinned to immutable 40-character commit SHAs:`n$($violations -join "`n")"
+    }
+}
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 Push-Location $repoRoot
 
@@ -41,8 +72,13 @@ try {
     Assert-PowerShellScriptParses (Join-Path $repoRoot 'install.ps1')
     Assert-PowerShellScriptParses (Join-Path $PSScriptRoot 'verify-install-ps1-integrity.ps1')
     Assert-PowerShellScriptParses (Join-Path $PSScriptRoot 'verify-supply-chain-stage.ps1')
+    Assert-PowerShellScriptParses (Join-Path $PSScriptRoot 'verify-release-build-policy.ps1')
     Assert-BashScriptParses -Path (Join-Path $repoRoot 'install.sh') -BashExecutable $bashCommand.Source
     Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'verify-install-sh-integrity.sh') -BashExecutable $bashCommand.Source
+    Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'build-release.sh') -BashExecutable $bashCommand.Source
+    Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'generate-default-pgo.sh') -BashExecutable $bashCommand.Source
+    Assert-BashScriptParses -Path (Join-Path $PSScriptRoot 'verify-reproducible-build.sh') -BashExecutable $bashCommand.Source
+    Assert-WorkflowActionsPinned (Join-Path $repoRoot '.github/workflows')
 
     if (-not $SkipLiveReleaseCheck) {
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/shaolonger/komari-agent/releases/latest' -UseBasicParsing
@@ -68,6 +104,11 @@ try {
     & go test ./update
     if ($LASTEXITCODE -ne 0) {
         throw 'go test ./update failed'
+    }
+
+    & (Join-Path $PSScriptRoot 'verify-release-build-policy.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'verify-release-build-policy.ps1 failed'
     }
 
     & (Join-Path $PSScriptRoot 'verify-install-ps1-integrity.ps1')
