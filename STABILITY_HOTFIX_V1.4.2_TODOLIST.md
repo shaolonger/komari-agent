@@ -21,4 +21,4 @@
 - [x] **A-HF-202** 全仓 unit、race、vet、fuzz 和 32 MiB soak
 - [x] **A-HF-203** Linux/ARM64/Windows/FreeBSD 交叉构建
 - [x] **A-HF-204** 与 Komari v1.4.3 的共享 schema 和跨仓契约门禁
-- [ ] **A-HF-205** 提交、推送、v1.4.2 tag、GitHub Release 与资产验收
+- [x] **A-HF-205** 提交、推送、v1.4.2 tag、GitHub Release 与资产验收
