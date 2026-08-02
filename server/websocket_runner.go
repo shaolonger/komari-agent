@@ -59,6 +59,7 @@ type telemetryGenerationConfig struct {
 type telemetryRunner struct {
 	endpoint         string
 	connect          telemetryConnector
+	connectWithoutV3 telemetryConnector
 	generation       telemetryGenerationConfig
 	maxRetries       int
 	reconnectBase    time.Duration
@@ -115,6 +116,7 @@ func newTelemetryRunner(endpoint string) *telemetryRunner {
 	runner := &telemetryRunner{
 		endpoint:         endpoint,
 		connect:          connectTelemetryWebSocket,
+		connectWithoutV3: connectTelemetryWebSocketWithoutV3,
 		maxRetries:       maxRetries,
 		reconnectBase:    reconnectBase,
 		reconnectMaximum: reconnectMaximum,
@@ -147,14 +149,11 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 	queue := newOutboundQueue(ctx, defaultReliableQueueCapacity, defaultReliableWriteAttempts)
 	runner.generation.queue = queue
 	defer queue.Close(true)
-	if runner.generation.delivery == nil && runner.deliveryFactory != nil {
-		delivery, err := runner.deliveryFactory()
-		if err != nil {
-			return fmt.Errorf("open telemetry recovery spool: %w", err)
+	defer func() {
+		if runner.generation.delivery != nil {
+			_ = runner.generation.delivery.Close()
 		}
-		runner.generation.delivery = delivery
-		defer delivery.Close()
-	}
+	}()
 
 	failedConnections := 0
 	shortGenerations := 0
@@ -183,6 +182,26 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 		}
 
 		failedConnections = 0
+		if protocol == telemetryProtocolV3 && runner.generation.delivery == nil && runner.deliveryFactory != nil {
+			delivery, deliveryErr := runner.deliveryFactory()
+			if deliveryErr != nil {
+				_ = session.Close()
+				if runner.connectWithoutV3 == nil {
+					return fmt.Errorf("open telemetry recovery spool: %w", deliveryErr)
+				}
+				log.Printf("Telemetry v3 durable spool is unavailable; reconnecting with v2/v1 compatibility: %v", deliveryErr)
+				session, protocol, err = runner.connectWithoutV3(ctx, runner.endpoint)
+				if err != nil {
+					return fmt.Errorf("connect without telemetry v3 after spool failure: %w", err)
+				}
+				if protocol == telemetryProtocolV3 {
+					_ = session.Close()
+					return errors.New("fallback telemetry connector unexpectedly selected v3")
+				}
+			} else {
+				runner.generation.delivery = delivery
+			}
+		}
 		connectedAt := runner.generation.now()
 		log.Printf("WebSocket connected (telemetry protocol v%d)", protocol)
 		diagnostics.RecordWebSocketConnected()
@@ -469,7 +488,15 @@ func writeOutboundFrames(ctx context.Context, session telemetrySession, config t
 }
 
 func connectTelemetryWebSocket(ctx context.Context, endpoint string) (telemetrySession, telemetryProtocol, error) {
-	dialer := newTelemetryWSDialer()
+	return connectTelemetryWebSocketWithDialer(ctx, endpoint, newTelemetryWSDialer())
+}
+
+func connectTelemetryWebSocketWithoutV3(ctx context.Context, endpoint string) (telemetrySession, telemetryProtocol, error) {
+	dialer := newTelemetryWSDialerWithoutV3()
+	return connectTelemetryWebSocketWithDialer(ctx, endpoint, dialer)
+}
+
+func connectTelemetryWebSocketWithDialer(ctx context.Context, endpoint string, dialer *websocket.Dialer) (telemetrySession, telemetryProtocol, error) {
 	conn, response, err := dialer.DialContext(ctx, endpoint, newWSHeaders())
 	if err != nil {
 		if response != nil {

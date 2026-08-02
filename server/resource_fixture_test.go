@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,7 +20,9 @@ func TestDisconnectedSpoolStaysBoundedAcrossLongLogicalOutage(t *testing.T) {
 	total := uint64(spoolMaximumFrames + 257)
 	for sequence := uint64(1); sequence <= total; sequence++ {
 		payload[0] = byte(sequence)
-		if err := spool.Add(sequence, payload, time.Now()); err != nil {
+		if err := spool.Add(sequence, payload, time.Now()); errors.Is(err, ErrTelemetrySpoolFull) {
+			break
+		} else if err != nil {
 			t.Fatalf("add sequence %d: %v", sequence, err)
 		}
 	}
@@ -27,7 +30,7 @@ func TestDisconnectedSpoolStaysBoundedAcrossLongLogicalOutage(t *testing.T) {
 	if len(pending) != spoolMaximumFrames {
 		t.Fatalf("pending frames = %d, want %d", len(pending), spoolMaximumFrames)
 	}
-	if pending[0].Sequence != total-spoolMaximumFrames+1 || pending[len(pending)-1].Sequence != total {
+	if pending[0].Sequence != 1 || pending[len(pending)-1].Sequence != spoolMaximumFrames {
 		t.Fatalf("retained sequence range = %d..%d", pending[0].Sequence, pending[len(pending)-1].Sequence)
 	}
 	info, err := os.Stat(path)

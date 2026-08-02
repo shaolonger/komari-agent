@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -176,7 +177,20 @@ func (batcher *pingResultBatcher) HandleControl(message []byte) bool {
 	switch control.Type {
 	case "ping_result_ack":
 		if control.Through > 0 {
-			_ = batcher.spool.Ack(control.Through)
+			acknowledged := false
+			batcher.mu.Lock()
+			if err := batcher.spool.Ack(control.Through); err != nil {
+				log.Printf("Failed to persist Ping acknowledgement through %d: %v", control.Through, err)
+			} else {
+				batcher.next = max(batcher.next, control.Through+1)
+				acknowledged = true
+			}
+			batcher.mu.Unlock()
+			if acknowledged {
+				if err := batcher.enqueuePending(); err != nil {
+					log.Printf("Failed to reconcile Ping queue after acknowledgement: %v", err)
+				}
+			}
 		}
 		return true
 	case "ping_result_nack":

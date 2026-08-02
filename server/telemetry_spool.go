@@ -14,14 +14,16 @@ import (
 )
 
 const (
-	spoolRecordMagic   = uint32(0x3150534b) // KSP1
-	spoolRecordHeader  = 32
-	spoolRecordAdd     = byte(1)
-	spoolRecordAck     = byte(2)
-	spoolMaximumFrames = 4096
-	spoolMaximumBytes  = 4 << 20
-	spoolMaximumAge    = 24 * time.Hour
+	spoolRecordMagic     = uint32(0x3150534b) // KSP1
+	spoolRecordHeader    = 32
+	spoolRecordAdd       = byte(1)
+	spoolRecordAck       = byte(2)
+	spoolRecordHighWater = byte(3)
+	spoolMaximumFrames   = 4096
+	spoolMaximumBytes    = 4 << 20
 )
+
+var ErrTelemetrySpoolFull = errors.New("telemetry spool is full")
 
 type spooledFrame struct {
 	Sequence  uint64
@@ -99,11 +101,20 @@ func (spool *telemetrySpool) load(file *os.File) error {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	cutoff := spool.now().Add(-spoolMaximumAge)
+	validOffset := int64(0)
 	for {
 		header := make([]byte, spoolRecordHeader)
-		_, err := io.ReadFull(file, header)
+		read, err := io.ReadFull(file, header)
 		if errors.Is(err, io.EOF) {
+			break
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			if validOffset == 0 && read > 0 {
+				return errors.New("invalid telemetry spool prefix")
+			}
+			if truncateErr := file.Truncate(validOffset); truncateErr != nil {
+				return errors.Join(errors.New("truncated telemetry spool record"), truncateErr)
+			}
 			break
 		}
 		if err != nil {
@@ -121,15 +132,17 @@ func (spool *telemetrySpool) load(file *os.File) error {
 			return errors.New("invalid telemetry spool record bounds")
 		}
 		payload := make([]byte, length)
-		if _, err := io.ReadFull(file, payload); err != nil || crc32.ChecksumIEEE(payload) != checksum {
+		if _, err := io.ReadFull(file, payload); errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+			if truncateErr := file.Truncate(validOffset); truncateErr != nil {
+				return errors.Join(errors.New("truncated telemetry spool payload"), truncateErr)
+			}
+			break
+		} else if err != nil || crc32.ChecksumIEEE(payload) != checksum {
 			return errors.New("invalid telemetry spool checksum")
 		}
 		spool.maximumSeen = max(spool.maximumSeen, sequence)
 		switch kind {
 		case spoolRecordAdd:
-			if createdAt.Before(cutoff) {
-				continue
-			}
 			if previous, exists := spool.pending[sequence]; exists {
 				spool.payloadBytes -= len(previous.Payload)
 			}
@@ -145,16 +158,21 @@ func (spool *telemetrySpool) load(file *os.File) error {
 					delete(spool.pending, pendingSequence)
 				}
 			}
+		case spoolRecordHighWater:
+			// A high-water record survives compaction even when every emitted frame
+			// has already been acknowledged. It intentionally changes no pending
+			// state; it only prevents sequence reuse after a process restart.
 		default:
 			return errors.New("invalid telemetry spool record type")
 		}
+		validOffset += int64(spoolRecordHeader + length)
 	}
 	_, err := file.Seek(0, io.SeekEnd)
 	return err
 }
 
 func telemetryMaximumFrameSize(kind byte) int {
-	if kind == spoolRecordAck {
+	if kind == spoolRecordAck || kind == spoolRecordHighWater {
 		return 0
 	}
 	return 64 << 10
@@ -169,10 +187,11 @@ func (spool *telemetrySpool) Add(sequence uint64, payload []byte, createdAt time
 	if sequence <= spool.maximumSeen {
 		return errors.New("telemetry sequence is not monotonic")
 	}
-	for len(spool.pending) >= spoolMaximumFrames || spool.payloadBytes+len(payload) > spoolMaximumBytes {
-		if err := spool.dropOldestLocked(); err != nil {
-			return err
-		}
+	if len(spool.pending) >= spoolMaximumFrames || spool.payloadBytes+len(payload) > spoolMaximumBytes {
+		// Dropping the oldest unacknowledged frame creates a permanent hole in
+		// the server's contiguous sequence. Apply backpressure instead; callers
+		// reconnect and retry the still-complete bounded prefix.
+		return ErrTelemetrySpoolFull
 	}
 	if err := spool.appendRecordLocked(spoolRecordAdd, sequence, createdAt, payload); err != nil {
 		return err
@@ -190,12 +209,14 @@ func (spool *telemetrySpool) Ack(through uint64) error {
 	}
 	spool.mu.Lock()
 	defer spool.mu.Unlock()
-	if through > spool.maximumSeen {
-		return errors.New("ack sequence exceeds the highest emitted sequence")
-	}
 	if err := spool.appendRecordLocked(spoolRecordAck, through, spool.now(), nil); err != nil {
 		return err
 	}
+	// The authenticated server is authoritative after local spool deletion or
+	// corruption. Advancing to its durable checkpoint repairs the local stream
+	// immediately instead of replaying sequence numbers for the agent's entire
+	// previous uptime.
+	spool.maximumSeen = max(spool.maximumSeen, through)
 	for sequence, frame := range spool.pending {
 		if sequence <= through {
 			spool.payloadBytes -= len(frame.Payload)
@@ -236,41 +257,21 @@ func (spool *telemetrySpool) Close() error {
 }
 
 func (spool *telemetrySpool) appendRecordLocked(kind byte, sequence uint64, createdAt time.Time, payload []byte) error {
-	header := make([]byte, spoolRecordHeader)
-	binary.LittleEndian.PutUint32(header[:4], spoolRecordMagic)
-	header[4] = kind
-	binary.LittleEndian.PutUint64(header[8:16], sequence)
-	binary.LittleEndian.PutUint64(header[16:24], uint64(createdAt.UnixMilli()))
-	binary.LittleEndian.PutUint32(header[24:28], uint32(len(payload)))
-	binary.LittleEndian.PutUint32(header[28:32], crc32.ChecksumIEEE(payload))
-	if _, err := spool.file.Write(header); err != nil {
+	record := make([]byte, spoolRecordHeader+len(payload))
+	binary.LittleEndian.PutUint32(record[:4], spoolRecordMagic)
+	record[4] = kind
+	binary.LittleEndian.PutUint64(record[8:16], sequence)
+	binary.LittleEndian.PutUint64(record[16:24], uint64(createdAt.UnixMilli()))
+	binary.LittleEndian.PutUint32(record[24:28], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(record[28:32], crc32.ChecksumIEEE(payload))
+	copy(record[spoolRecordHeader:], payload)
+	if written, err := spool.file.Write(record); err != nil {
 		return err
-	}
-	if len(payload) > 0 {
-		if _, err := spool.file.Write(payload); err != nil {
-			return err
-		}
+	} else if written != len(record) {
+		return io.ErrShortWrite
 	}
 	return spool.file.Sync()
 }
-
-func (spool *telemetrySpool) dropOldestLocked() error {
-	oldest := uint64(mathMaxUint64)
-	for sequence := range spool.pending {
-		oldest = min(oldest, sequence)
-	}
-	if frame, exists := spool.pending[oldest]; exists {
-		spool.payloadBytes -= len(frame.Payload)
-		delete(spool.pending, oldest)
-		if err := spool.appendRecordLocked(spoolRecordAck, oldest, spool.now(), nil); err != nil {
-			return err
-		}
-		spool.ackRecords++
-	}
-	return spool.maybeCompactLocked()
-}
-
-const mathMaxUint64 = ^uint64(0)
 
 func (spool *telemetrySpool) maybeCompactLocked() error {
 	info, _ := spool.file.Stat()
@@ -293,16 +294,12 @@ func (spool *telemetrySpool) compactLocked() error {
 	}
 	sort.Slice(pending, func(left, right int) bool { return pending[left].Sequence < pending[right].Sequence })
 	writeErr := error(nil)
+	if spool.maximumSeen > 0 {
+		writeErr = writeSpoolRecord(file, spoolRecordHighWater, spool.maximumSeen, spool.now(), nil)
+	}
 	for _, frame := range pending {
-		header := make([]byte, spoolRecordHeader)
-		binary.LittleEndian.PutUint32(header[:4], spoolRecordMagic)
-		header[4] = spoolRecordAdd
-		binary.LittleEndian.PutUint64(header[8:16], frame.Sequence)
-		binary.LittleEndian.PutUint64(header[16:24], uint64(frame.CreatedAt.UnixMilli()))
-		binary.LittleEndian.PutUint32(header[24:28], uint32(len(frame.Payload)))
-		binary.LittleEndian.PutUint32(header[28:32], crc32.ChecksumIEEE(frame.Payload))
-		if _, writeErr = file.Write(header); writeErr == nil {
-			_, writeErr = file.Write(frame.Payload)
+		if writeErr == nil {
+			writeErr = writeSpoolRecord(file, spoolRecordAdd, frame.Sequence, frame.CreatedAt, frame.Payload)
 		}
 		if writeErr != nil {
 			break
@@ -324,6 +321,23 @@ func (spool *telemetrySpool) compactLocked() error {
 	}
 	spool.ackRecords = 0
 	return spool.openAndLoadAfterCompact()
+}
+
+func writeSpoolRecord(file *os.File, kind byte, sequence uint64, createdAt time.Time, payload []byte) error {
+	record := make([]byte, spoolRecordHeader+len(payload))
+	binary.LittleEndian.PutUint32(record[:4], spoolRecordMagic)
+	record[4] = kind
+	binary.LittleEndian.PutUint64(record[8:16], sequence)
+	binary.LittleEndian.PutUint64(record[16:24], uint64(createdAt.UnixMilli()))
+	binary.LittleEndian.PutUint32(record[24:28], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(record[28:32], crc32.ChecksumIEEE(payload))
+	copy(record[spoolRecordHeader:], payload)
+	if written, err := file.Write(record); err != nil {
+		return err
+	} else if written != len(record) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func (spool *telemetrySpool) openAndLoadAfterCompact() error {

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -37,6 +38,61 @@ func TestTelemetryDeliveryPersistsBeforeSendAndHandlesAck(t *testing.T) {
 	}
 	if delivery.HandleControl([]byte(`{"message":"ping"}`)) {
 		t.Fatal("non-ack control message was consumed")
+	}
+}
+
+func TestTelemetryDeliveryNackRequeuesDurableFrames(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	delivery, err := newTelemetryDelivery(filepath.Join(t.TempDir(), "delivery.spool"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer delivery.Close()
+	if err := delivery.Sample(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := delivery.Flush(now, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := newOutboundQueue(t.Context(), 16, 3)
+	defer queue.Close(false)
+	if err := delivery.enqueuePending(t.Context(), queue); err != nil {
+		t.Fatal(err)
+	}
+	if !delivery.HandleControl([]byte(`{"type":"telemetry_nack","expected":1}`)) {
+		t.Fatal("telemetry NACK was not handled")
+	}
+	frame, err := queue.Take(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(frame.payload) != string(first.Payload) {
+		t.Fatal("NACK did not restore the durable frame")
+	}
+}
+
+func TestTelemetryDeliveryRetainsAggregateWhenSpoolWriteFails(t *testing.T) {
+	now := time.Unix(1_710_000_000, 0).UTC()
+	delivery, err := newTelemetryDelivery(filepath.Join(t.TempDir(), "delivery-full.spool"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer delivery.Close()
+	if err := delivery.Sample(); err != nil {
+		t.Fatal(err)
+	}
+	delivery.spool.mu.Lock()
+	delivery.spool.payloadBytes = spoolMaximumBytes
+	delivery.spool.mu.Unlock()
+	if _, err := delivery.Flush(now, true); !errors.Is(err, ErrTelemetrySpoolFull) {
+		t.Fatalf("flush error = %v, want spool full", err)
+	}
+	if got := delivery.aggregator.PendingSamples(); got != 1 {
+		t.Fatalf("pending samples after failed durable write = %d, want 1", got)
+	}
+	if delivery.next != 1 {
+		t.Fatalf("next sequence after failed durable write = %d, want 1", delivery.next)
 	}
 }
 

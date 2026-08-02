@@ -270,6 +270,12 @@ func newTelemetryWSDialer() *websocket.Dialer {
 	return dialer
 }
 
+func newTelemetryWSDialerWithoutV3() *websocket.Dialer {
+	dialer := newWSDialer()
+	dialer.Subprotocols = []string{telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
+	return dialer
+}
+
 // newWSHeaders 统一构造 WS 请求头（含 Cloudflare Access 头）
 func newWSHeaders() http.Header {
 	headers := http.Header{}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,6 +19,7 @@ type telemetryDelivery struct {
 	spool      *telemetrySpool
 	aggregator *monitoring.V3Aggregator
 	next       uint64
+	queue      *outboundQueue
 }
 
 func defaultTelemetrySpoolPath() (string, error) {
@@ -56,13 +58,14 @@ func (delivery *telemetryDelivery) Flush(sampledAt time.Time, forceCheckpoint bo
 		}
 	}
 	sequence := delivery.next
-	payload, err := monitoring.EncodeReportV3(delivery.aggregator, sequence, sampledAt, forceCheckpoint)
+	prepared, payload, err := monitoring.PrepareReportV3(delivery.aggregator, sequence, sampledAt, forceCheckpoint)
 	if err != nil {
 		return spooledFrame{}, err
 	}
 	if err := delivery.spool.Add(sequence, payload, sampledAt); err != nil {
 		return spooledFrame{}, fmt.Errorf("persist telemetry frame: %w", err)
 	}
+	delivery.aggregator.Commit(prepared)
 	delivery.next++
 	return spooledFrame{Sequence: sequence, CreatedAt: sampledAt, Payload: payload}, nil
 }
@@ -70,17 +73,46 @@ func (delivery *telemetryDelivery) Flush(sampledAt time.Time, forceCheckpoint bo
 func (delivery *telemetryDelivery) Pending() []spooledFrame { return delivery.spool.Pending() }
 
 func (delivery *telemetryDelivery) HandleControl(message []byte) bool {
-	var ack struct {
-		Type    string `json:"type"`
-		Through uint64 `json:"through"`
+	var control struct {
+		Type     string `json:"type"`
+		Through  uint64 `json:"through"`
+		Expected uint64 `json:"expected"`
 	}
-	if err := json.Unmarshal(message, &ack); err != nil || ack.Type != "telemetry_ack" {
+	if err := json.Unmarshal(message, &control); err != nil {
 		return false
 	}
-	if ack.Through == 0 {
+	if control.Type == "telemetry_nack" {
+		log.Printf("Server requested telemetry sequence %d; replaying the contiguous durable spool", control.Expected)
+		delivery.mu.Lock()
+		queue := delivery.queue
+		delivery.mu.Unlock()
+		if queue != nil {
+			if err := delivery.enqueuePending(context.Background(), queue); err != nil {
+				log.Printf("Failed to re-enqueue telemetry after sequence NACK: %v", err)
+			}
+		}
 		return true
 	}
-	_ = delivery.spool.Ack(ack.Through)
+	if control.Type != "telemetry_ack" {
+		return false
+	}
+	if control.Through == 0 {
+		return true
+	}
+	delivery.mu.Lock()
+	if err := delivery.spool.Ack(control.Through); err != nil {
+		delivery.mu.Unlock()
+		log.Printf("Failed to persist telemetry acknowledgement through %d: %v", control.Through, err)
+		return true
+	}
+	delivery.next = max(delivery.next, control.Through+1)
+	queue := delivery.queue
+	delivery.mu.Unlock()
+	if queue != nil {
+		if err := delivery.enqueuePending(context.Background(), queue); err != nil {
+			log.Printf("Failed to reconcile telemetry queue after acknowledgement: %v", err)
+		}
+	}
 	return true
 }
 
@@ -92,6 +124,9 @@ func (delivery *telemetryDelivery) Close() error {
 }
 
 func (delivery *telemetryDelivery) enqueuePending(ctx context.Context, queue *outboundQueue) error {
+	delivery.mu.Lock()
+	delivery.queue = queue
+	delivery.mu.Unlock()
 	queue.RemoveTelemetryV3Reliable()
 	for _, frame := range delivery.Pending() {
 		if err := queue.EnqueueReliable(ctx, websocket.BinaryMessage, frame.Payload); err != nil {

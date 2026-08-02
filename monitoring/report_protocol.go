@@ -113,3 +113,15 @@ func EncodeReportV3(aggregator *V3Aggregator, sequence uint64, sampledAt time.Ti
 	diagnostics.ObserveReport(sampledAt, len(encoded), err)
 	return encoded, err
 }
+
+// PrepareReportV3 encodes a frame without consuming the aggregator. The caller
+// commits it only after the encoded bytes have reached the durable spool.
+func PrepareReportV3(aggregator *V3Aggregator, sequence uint64, sampledAt time.Time, forceCheckpoint bool) (telemetryv3.Frame, []byte, error) {
+	frame, err := aggregator.Prepare(sequence, sampledAt, forceCheckpoint)
+	if err != nil {
+		return telemetryv3.Frame{}, nil, err
+	}
+	encoded, err := telemetryv3.Encode(frame)
+	diagnostics.ObserveReport(sampledAt, len(encoded), err)
+	return frame, encoded, err
+}

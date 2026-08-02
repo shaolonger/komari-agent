@@ -259,6 +259,43 @@ func TestTelemetryRunnerReconnectsImmediatelyWithGenerationIsolation(t *testing.
 	}
 }
 
+func TestTelemetryRunnerFallsBackWhenV3SpoolIsUnavailable(t *testing.T) {
+	v3 := newFakeTelemetrySession()
+	legacy := newFakeTelemetrySession()
+	var fallbackCalls atomic.Int32
+	runner := &telemetryRunner{
+		endpoint:         "ws://fixture",
+		generation:       testTelemetryGenerationConfig(),
+		maxRetries:       0,
+		reconnectBase:    time.Second,
+		reconnectMaximum: time.Minute,
+		stableThreshold:  time.Minute,
+		fullJitter:       func(time.Duration) time.Duration { return 0 },
+		wait:             waitForContext,
+		connect: func(context.Context, string) (telemetrySession, telemetryProtocol, error) {
+			return v3, telemetryProtocolV3, nil
+		},
+		connectWithoutV3: func(context.Context, string) (telemetrySession, telemetryProtocol, error) {
+			fallbackCalls.Add(1)
+			return legacy, telemetryProtocolV1, nil
+		},
+		deliveryFactory: func() (*telemetryDelivery, error) {
+			return nil, errors.New("read-only fixture")
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() { finished <- runner.Run(ctx) }()
+	waitAtomicInt32(t, &fallbackCalls, 1)
+	cancel()
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("runner error = %v", err)
+	}
+	if v3.closeCalls.Load() != 1 || legacy.closeCalls.Load() != 1 {
+		t.Fatalf("connection closes = v3:%d legacy:%d", v3.closeCalls.Load(), legacy.closeCalls.Load())
+	}
+}
+
 func TestTelemetryRunnerConnectionBackoffDoublesCapsAndHonorsRetryLimit(t *testing.T) {
 	var connectCalls atomic.Int32
 	var delays []time.Duration

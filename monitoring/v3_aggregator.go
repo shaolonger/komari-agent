@@ -66,6 +66,18 @@ func (aggregator *V3Aggregator) Add(snapshot ReportSnapshot) error {
 }
 
 func (aggregator *V3Aggregator) Build(sequence uint64, sampledAt time.Time, forceCheckpoint bool) (telemetryv3.Frame, error) {
+	frame, err := aggregator.Prepare(sequence, sampledAt, forceCheckpoint)
+	if err != nil {
+		return telemetryv3.Frame{}, err
+	}
+	aggregator.Commit(frame)
+	return frame, nil
+}
+
+// Prepare builds an immutable frame without consuming the pending aggregate.
+// Durable delivery uses this two-phase form so a failed spool write cannot
+// discard samples that have not reached stable storage.
+func (aggregator *V3Aggregator) Prepare(sequence uint64, sampledAt time.Time, forceCheckpoint bool) (telemetryv3.Frame, error) {
 	if aggregator.count == 0 {
 		return telemetryv3.Frame{}, errors.New("telemetry v3 aggregate envelope is empty")
 	}
@@ -79,11 +91,16 @@ func (aggregator *V3Aggregator) Build(sequence uint64, sampledAt time.Time, forc
 		},
 		Latest: toTelemetryV2(&aggregator.latest),
 	}
-	if checkpoint {
-		aggregator.lastCheckpoint = sampledAt
+	return frame, nil
+}
+
+// Commit consumes a frame previously returned by Prepare. Callers must hold
+// their delivery lock between Prepare and Commit.
+func (aggregator *V3Aggregator) Commit(frame telemetryv3.Frame) {
+	if frame.Checkpoint {
+		aggregator.lastCheckpoint = frame.SampledAt
 	}
 	aggregator.resetEnvelope()
-	return frame, nil
 }
 
 func (aggregator *V3Aggregator) PendingSamples() uint32 { return aggregator.count }

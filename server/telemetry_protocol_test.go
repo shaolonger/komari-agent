@@ -34,6 +34,11 @@ func TestTelemetryDialerAdvertisesV3ThenV2ThenV1(t *testing.T) {
 	if !reflect.DeepEqual(dialer.Subprotocols, want) {
 		t.Fatalf("Subprotocols = %#v, want %#v", dialer.Subprotocols, want)
 	}
+	legacyDialer := newTelemetryWSDialerWithoutV3()
+	legacyWant := []string{telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol}
+	if !reflect.DeepEqual(legacyDialer.Subprotocols, legacyWant) {
+		t.Fatalf("fallback subprotocols = %#v, want %#v", legacyDialer.Subprotocols, legacyWant)
+	}
 	if terminalDialer := newWSDialer(); len(terminalDialer.Subprotocols) != 0 {
 		t.Fatalf("generic/terminal dialer advertised telemetry protocols: %#v", terminalDialer.Subprotocols)
 	}
