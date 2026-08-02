@@ -3,9 +3,54 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestBasicInfoAuthenticationRejectionIsNotRetried(t *testing.T) {
+	useServerFlagsSnapshot(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(writer, "token rejected", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	flags.Endpoint = server.URL
+	flags.Token = "invalid-fixture-token"
+
+	err := uploadBasicInfoContext(t.Context())
+	if !isAuthenticationRejection(err) {
+		t.Fatalf("upload error = %v, want authentication rejection", err)
+	}
+	if strings.Contains(err.Error(), "token rejected") || strings.Contains(err.Error(), flags.Token) {
+		t.Fatalf("authentication response leaked sensitive detail: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("authentication request count = %d, want 1", requests.Load())
+	}
+}
+
+func TestBasicInfoNonAuthenticationFailureKeepsLegacyCompatibilityRetry(t *testing.T) {
+	useServerFlagsSnapshot(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(writer, "legacy fixture", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	flags.Endpoint = server.URL
+
+	if err := uploadBasicInfoContext(t.Context()); err == nil {
+		t.Fatal("legacy compatibility fixture unexpectedly succeeded")
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("compatibility request count = %d, want 2", requests.Load())
+	}
+}
 
 func TestBuildCapabilityPayloadReflectsFlags(t *testing.T) {
 	original := *flags

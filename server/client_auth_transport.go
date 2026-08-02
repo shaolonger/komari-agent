@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +13,24 @@ import (
 
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 )
+
+type clientHTTPStatusError struct {
+	StatusCode int
+	Status     string
+}
+
+func (statusError *clientHTTPStatusError) Error() string {
+	if statusError.Status != "" {
+		return statusError.Status
+	}
+	return fmt.Sprintf("HTTP status %d", statusError.StatusCode)
+}
+
+func isAuthenticationRejection(err error) bool {
+	var statusError *clientHTTPStatusError
+	return errors.As(err, &statusError) &&
+		(statusError.StatusCode == http.StatusUnauthorized || statusError.StatusCode == http.StatusForbidden)
+}
 
 func buildClientAPIEndpoint(path string, query url.Values) string {
 	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + path

@@ -73,10 +73,18 @@ func (delivery *telemetryDelivery) Flush(sampledAt time.Time, forceCheckpoint bo
 func (delivery *telemetryDelivery) Pending() []spooledFrame { return delivery.spool.Pending() }
 
 func (delivery *telemetryDelivery) HandleControl(message []byte) bool {
+	return delivery.HandleControlContext(context.Background(), message)
+}
+
+func (delivery *telemetryDelivery) HandleControlContext(ctx context.Context, message []byte) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var control struct {
-		Type     string `json:"type"`
-		Through  uint64 `json:"through"`
-		Expected uint64 `json:"expected"`
+		Type            string `json:"type"`
+		Through         uint64 `json:"through"`
+		AcceptedThrough uint64 `json:"accepted_through"`
+		Expected        uint64 `json:"expected"`
 	}
 	if err := json.Unmarshal(message, &control); err != nil {
 		return false
@@ -87,7 +95,7 @@ func (delivery *telemetryDelivery) HandleControl(message []byte) bool {
 		queue := delivery.queue
 		delivery.mu.Unlock()
 		if queue != nil {
-			if err := delivery.enqueuePending(context.Background(), queue); err != nil {
+			if err := delivery.enqueuePendingFrom(ctx, queue, control.Expected); err != nil && ctx.Err() == nil {
 				log.Printf("Failed to re-enqueue telemetry after sequence NACK: %v", err)
 			}
 		}
@@ -106,13 +114,7 @@ func (delivery *telemetryDelivery) HandleControl(message []byte) bool {
 		return true
 	}
 	delivery.next = max(delivery.next, control.Through+1)
-	queue := delivery.queue
 	delivery.mu.Unlock()
-	if queue != nil {
-		if err := delivery.enqueuePending(context.Background(), queue); err != nil {
-			log.Printf("Failed to reconcile telemetry queue after acknowledgement: %v", err)
-		}
-	}
 	return true
 }
 
@@ -124,11 +126,21 @@ func (delivery *telemetryDelivery) Close() error {
 }
 
 func (delivery *telemetryDelivery) enqueuePending(ctx context.Context, queue *outboundQueue) error {
+	return delivery.enqueuePendingFrom(ctx, queue, 1)
+}
+
+func (delivery *telemetryDelivery) enqueuePendingFrom(ctx context.Context, queue *outboundQueue, expected uint64) error {
+	if expected == 0 {
+		expected = 1
+	}
 	delivery.mu.Lock()
 	delivery.queue = queue
 	delivery.mu.Unlock()
 	queue.RemoveTelemetryV3Reliable()
 	for _, frame := range delivery.Pending() {
+		if frame.Sequence < expected {
+			continue
+		}
 		if err := queue.EnqueueReliable(ctx, websocket.BinaryMessage, frame.Payload); err != nil {
 			return err
 		}

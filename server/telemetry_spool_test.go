@@ -109,6 +109,62 @@ func TestTelemetrySpoolCompactionPersistsHighWaterAcrossRestart(t *testing.T) {
 	if reopened.NextSequence() != 65 || len(reopened.Pending()) != 0 {
 		t.Fatalf("compacted high water was lost: next=%d pending=%#v", reopened.NextSequence(), reopened.Pending())
 	}
+	if reopened.acknowledgedThrough != 64 {
+		t.Fatalf("compacted acknowledgement = %d, want 64", reopened.acknowledgedThrough)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Ack(64); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("duplicate compacted ACK grew spool from %d to %d bytes", before.Size(), after.Size())
+	}
+}
+
+func TestTelemetrySpoolDuplicateAndStaleAcknowledgementsDoNoIO(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "telemetry.spool")
+	now := time.Unix(1_700_000_000, 0)
+	spool, err := openTelemetrySpool(path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spool.Close()
+	if err := spool.Add(1, []byte("frame-1"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.Add(2, []byte("frame-2"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.Ack(1); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 128 {
+		if err := spool.Ack(1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() || spool.ackRecords != 1 {
+		t.Fatalf("duplicate ACK performed I/O: size %d -> %d, records=%d", before.Size(), after.Size(), spool.ackRecords)
+	}
+	pending := spool.Pending()
+	if len(pending) != 1 || pending[0].Sequence != 2 {
+		t.Fatalf("duplicate ACK changed pending frames: %#v", pending)
+	}
 }
 
 func TestTelemetrySpoolRecoversValidPrefixAfterCrashTruncatedTail(t *testing.T) {

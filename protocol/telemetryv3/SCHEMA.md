@@ -11,3 +11,24 @@ The envelope contains sample count, CPU min/max/sum, RAM-used min/max/sum and
 network total-counter deltas. It preserves peaks and totals while allowing a
 lower network cadence. Counts, finite floats, ordering, every nested length and
 the v2 report are validated before allocation or use.
+
+## Durable control messages
+
+The server sends JSON control messages as WebSocket text frames. A cumulative
+acknowledgement has the shape
+`{"type":"telemetry_ack","through":N,"accepted_through":M}` where `N` is the
+highest sequence durably committed with its history rows and `M >= N` is the
+highest sequence accepted by the current server process. Older servers may omit
+`accepted_through`; agents must treat it as informational and must delete only
+frames through `N`.
+
+An ACK is never a replay instruction. The server sends only positive,
+per-connection advancing durable ACKs. The agent applies duplicate or stale
+ACKs as no-ops without spool writes and never re-enqueues pending frames because
+of an ACK.
+
+Only `{"type":"telemetry_nack","expected":N}` requests replay. The agent
+replaces queued v3 frames with its durable pending suffix beginning at `N` and
+keeps unrelated reliable control results. Replay is canceled when that
+WebSocket generation ends. These rules preserve at-least-once recovery without
+an ACK/replay feedback loop.

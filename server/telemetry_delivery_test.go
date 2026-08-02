@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari-agent/protocol/telemetryv3"
 )
 
@@ -51,24 +53,114 @@ func TestTelemetryDeliveryNackRequeuesDurableFrames(t *testing.T) {
 	if err := delivery.Sample(); err != nil {
 		t.Fatal(err)
 	}
-	first, err := delivery.Flush(now, true)
-	if err != nil {
-		t.Fatal(err)
+	for range 3 {
+		if _, err := delivery.Flush(now, true); err != nil {
+			t.Fatal(err)
+		}
 	}
 	queue := newOutboundQueue(t.Context(), 16, 3)
 	defer queue.Close(false)
 	if err := delivery.enqueuePending(t.Context(), queue); err != nil {
 		t.Fatal(err)
 	}
-	if !delivery.HandleControl([]byte(`{"type":"telemetry_nack","expected":1}`)) {
+	if !delivery.HandleControl([]byte(`{"type":"telemetry_nack","expected":2}`)) {
 		t.Fatal("telemetry NACK was not handled")
 	}
 	frame, err := queue.Take(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(frame.payload) != string(first.Payload) {
-		t.Fatal("NACK did not restore the durable frame")
+	decoded, err := telemetryv3.Decode(frame.payload)
+	if err != nil || decoded.Sequence != 2 {
+		t.Fatalf("NACK replay started at sequence %#v, err=%v", decoded, err)
+	}
+	_, reliable := queue.Depth()
+	if reliable != 2 {
+		t.Fatalf("NACK reliable depth = %d, want sequences 2 and 3", reliable)
+	}
+}
+
+func TestTelemetryDeliveryPartialAndDuplicateAckNeverRequeuesPendingFrames(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	path := filepath.Join(t.TempDir(), "delivery.spool")
+	delivery, err := newTelemetryDelivery(path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer delivery.Close()
+	for range 2 {
+		if _, err := delivery.Flush(now, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queue := newOutboundQueue(t.Context(), 16, 3)
+	defer queue.Close(false)
+	if err := delivery.enqueuePending(t.Context(), queue); err != nil {
+		t.Fatal(err)
+	}
+	// Both frames have left the local writer queue, while the server has only
+	// made sequence 1 durable. A normal partial ACK must not put sequence 2 back
+	// into the queue; only a NACK is a replay instruction.
+	for range 2 {
+		frame, err := queue.Take(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		queue.Ack(frame)
+	}
+	ack := []byte(`{"type":"telemetry_ack","through":1,"accepted_through":2}`)
+	if !delivery.HandleControl(ack) || !delivery.HandleControl(ack) {
+		t.Fatal("telemetry ACK was not handled")
+	}
+	if _, reliable := queue.Depth(); reliable != 0 {
+		t.Fatalf("partial ACK requeued %d reliable frames", reliable)
+	}
+	pending := delivery.Pending()
+	if len(pending) != 1 || pending[0].Sequence != 2 {
+		t.Fatalf("partial ACK pending = %#v", pending)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !delivery.HandleControl(ack) {
+		t.Fatal("duplicate telemetry ACK was not handled")
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != info.Size() {
+		t.Fatalf("duplicate ACK grew spool from %d to %d bytes", info.Size(), after.Size())
+	}
+}
+
+func TestTelemetryDeliveryNackReplayStopsWithConnectionGeneration(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	delivery, err := newTelemetryDelivery(filepath.Join(t.TempDir(), "delivery.spool"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer delivery.Close()
+	if _, err := delivery.Flush(now, true); err != nil {
+		t.Fatal(err)
+	}
+	queue := newOutboundQueue(t.Context(), 1, 3)
+	defer queue.Close(false)
+	if err := queue.EnqueueReliable(t.Context(), websocket.TextMessage, []byte("control-result")); err != nil {
+		t.Fatal(err)
+	}
+	delivery.mu.Lock()
+	delivery.queue = queue
+	delivery.mu.Unlock()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	started := time.Now()
+	if !delivery.HandleControlContext(ctx, []byte(`{"type":"telemetry_nack","expected":1}`)) {
+		t.Fatal("telemetry NACK was not handled")
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("canceled NACK replay blocked for %s", elapsed)
 	}
 }
 

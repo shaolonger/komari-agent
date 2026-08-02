@@ -14,8 +14,8 @@
 
 - [x] **A3-101** 聚合 frame 使用 Prepare/Commit 两阶段提交
 - [x] **A3-102** spool 写失败时保留聚合窗口与 next sequence
-- [x] **A3-103** ACK 后对 telemetry 可靠队列与 spool 对账
-- [x] **A3-104** NACK 后立即重放连续 durable frames
+- [x] **A3-103** ACK 只推进 durable spool，禁止把普通确认解释为重放
+- [x] **A3-104** NACK 后从 expected 起重放连续 durable suffix
 - [x] **A3-105** Ping ACK/NACK 同步 sequence 并对账独立队列
 
 ## A3-2 兼容与安全
@@ -31,3 +31,10 @@
 - [x] **A3-303** Linux/Windows/Darwin/FreeBSD 交叉构建
 - [x] **A3-304** 与 Komari v1.4.2 的 v1/v2/v3 交叉协议验收
 - [x] **A3-305** 版本、提交、推送、tag 与 GitHub Release
+
+## A3-H1 发布后稳定性收口
+
+- [x] **A3-H101** duplicate/stale ACK 零 I/O 幂等并跨 compact 保存水位
+- [x] **A3-H102** NACK 重放绑定 WebSocket 代际取消
+- [x] **A3-H103** 401/403 单请求、固定冷却和无敏感响应体日志
+- [x] **A3-H104** 修复并执行服务端 RPC v2.4 交叉契约门禁

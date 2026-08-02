@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -113,6 +112,12 @@ func uploadBasicInfoContext(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Retrying a reduced compatibility payload cannot fix rejected
+		// credentials. It only doubles unauthorized traffic and obscures the
+		// actionable token/proxy error.
+		if isAuthenticationRejection(err) {
+			return err
+		}
 		// 兼容 <= 1.0.2
 		delete(data, "kernel_version")
 		for key := range buildCapabilityPayload() {
@@ -165,10 +170,8 @@ func tryUploadDataContext(ctx context.Context, data map[string]interface{}) erro
 	if len(body) > 64*1024 {
 		return errors.New("basic info response exceeds 64 KiB")
 	}
-	message := string(body)
-
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status code: %d,%s", resp.StatusCode, message)
+		return &clientHTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 
 	return nil

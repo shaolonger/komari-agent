@@ -329,6 +329,52 @@ func TestTelemetryRunnerConnectionBackoffDoublesCapsAndHonorsRetryLimit(t *testi
 	}
 }
 
+func TestTelemetryRunnerAuthenticationRejectionUsesFixedCooldownWithoutExiting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var connectCalls atomic.Int32
+	var delay time.Duration
+	runner := &telemetryRunner{
+		endpoint:         "ws://fixture",
+		generation:       testTelemetryGenerationConfig(),
+		maxRetries:       0,
+		reconnectBase:    time.Second,
+		reconnectMaximum: time.Minute,
+		stableThreshold:  time.Minute,
+		fullJitter:       func(time.Duration) time.Duration { return 0 },
+		wait: func(_ context.Context, got time.Duration) bool {
+			delay = got
+			cancel()
+			return false
+		},
+		connect: func(context.Context, string) (telemetrySession, telemetryProtocol, error) {
+			connectCalls.Add(1)
+			return nil, telemetryProtocolV1, &clientHTTPStatusError{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized"}
+		},
+	}
+	err := runner.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runner error = %v, want context canceled", err)
+	}
+	if connectCalls.Load() != 1 || delay != authenticationRetryInterval {
+		t.Fatalf("authentication retry calls=%d delay=%s", connectCalls.Load(), delay)
+	}
+}
+
+func TestTelemetryConnectorClassifiesHTTPAuthenticationRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "sensitive rejection detail", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	_, _, err := connectTelemetryWebSocketWithDialer(t.Context(), endpoint, websocket.DefaultDialer)
+	if !isAuthenticationRejection(err) {
+		t.Fatalf("connector error = %v, want authentication rejection", err)
+	}
+	if strings.Contains(err.Error(), "sensitive rejection detail") {
+		t.Fatalf("connector leaked response body: %v", err)
+	}
+}
+
 func TestTelemetryRunnerBacksOffRepeatedShortGenerations(t *testing.T) {
 	var connectCalls atomic.Int32
 	var delays []time.Duration
@@ -550,7 +596,7 @@ func testTelemetryGenerationConfig() telemetryGenerationConfig {
 		buildFrame: func(telemetryProtocol) (int, []byte, error) {
 			return websocket.TextMessage, []byte("fixture-report"), nil
 		},
-		handleMessage: func([]byte) {},
+		handleMessage: func(context.Context, []byte) {},
 		queue:         newOutboundQueue(context.Background(), 8, 3),
 	}
 }

@@ -28,6 +28,7 @@ const (
 	defaultTelemetryReadLimit         = telemetryv2.MaxFrameSize
 	defaultStableConnectionThreshold  = time.Minute
 	maximumReconnectBackoff           = time.Minute
+	authenticationRetryInterval       = time.Minute
 )
 
 type telemetrySession interface {
@@ -50,7 +51,7 @@ type telemetryGenerationConfig struct {
 	readLimit         int64
 	now               func() time.Time
 	buildFrame        func(telemetryProtocol) (int, []byte, error)
-	handleMessage     func([]byte)
+	handleMessage     func(context.Context, []byte)
 	queue             *outboundQueue
 	delivery          *telemetryDelivery
 	v3SendInterval    time.Duration
@@ -164,6 +165,14 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 		log.Println("Attempting to connect to WebSocket...")
 		session, protocol, err := runner.connect(ctx, runner.endpoint)
 		if err != nil {
+			if isAuthenticationRejection(err) {
+				failedConnections = 0
+				log.Printf("WebSocket authentication rejected; verify the client token and reverse-proxy Authorization forwarding; retrying in %s: %v", authenticationRetryInterval, err)
+				if !runner.wait(ctx, authenticationRetryInterval) {
+					return ctx.Err()
+				}
+				continue
+			}
 			if failedConnections >= runner.maxRetries {
 				return fmt.Errorf("maximum WebSocket retries reached: %w", err)
 			}
@@ -206,11 +215,11 @@ func (runner *telemetryRunner) Run(ctx context.Context) error {
 		log.Printf("WebSocket connected (telemetry protocol v%d)", protocol)
 		diagnostics.RecordWebSocketConnected()
 		queue.ResetEphemeral()
-		runner.generation.handleMessage = func(message []byte) {
-			if runner.generation.delivery != nil && runner.generation.delivery.HandleControl(message) {
+		runner.generation.handleMessage = func(messageCtx context.Context, message []byte) {
+			if runner.generation.delivery != nil && runner.generation.delivery.HandleControlContext(messageCtx, message) {
 				return
 			}
-			handleWebSocketMessageContext(ctx, queue, message)
+			handleWebSocketMessageContext(messageCtx, queue, message)
 		}
 		err = runTelemetryGeneration(ctx, session, protocol, runner.generation)
 		activePingLease.Stop()
@@ -344,9 +353,9 @@ func validateTelemetryGenerationConfig(config telemetryGenerationConfig) error {
 	return nil
 }
 
-func readTelemetryMessages(ctx context.Context, session telemetrySession, handle func([]byte)) error {
+func readTelemetryMessages(ctx context.Context, session telemetrySession, handle func(context.Context, []byte)) error {
 	if handle == nil {
-		handle = func([]byte) {}
+		handle = func(context.Context, []byte) {}
 	}
 	for {
 		messageType, message, err := session.ReadMessage()
@@ -360,7 +369,7 @@ func readTelemetryMessages(ctx context.Context, session telemetrySession, handle
 			return fmt.Errorf("unsupported control WebSocket message type %d", messageType)
 		}
 		diagnostics.RecordWebSocketMessageRead()
-		handle(message)
+		handle(ctx, message)
 	}
 }
 
@@ -505,7 +514,7 @@ func connectTelemetryWebSocketWithDialer(ctx context.Context, endpoint string, d
 				_ = response.Body.Close()
 			}
 			if response.StatusCode != 101 {
-				return nil, telemetryProtocolV1, errors.New(status)
+				return nil, telemetryProtocolV1, &clientHTTPStatusError{StatusCode: response.StatusCode, Status: status}
 			}
 		}
 		return nil, telemetryProtocolV1, err

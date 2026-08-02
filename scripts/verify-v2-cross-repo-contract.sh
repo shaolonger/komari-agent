@@ -9,6 +9,8 @@ diff -w -B "$agent_repo/protocol/telemetryv2/testdata/report_v2.hex" \
   "$server_repo/protocol/telemetryv2/testdata/report_v2.hex"
 diff -w -B "$agent_repo/protocol/telemetryv3/testdata/report_v3.hex" \
   "$server_repo/protocol/telemetryv3/testdata/report_v3.hex"
+diff -w -B "$agent_repo/protocol/telemetryv3/SCHEMA.md" \
+  "$server_repo/protocol/telemetryv3/SCHEMA.md"
 
 node -e '
 const fs = require("fs");
@@ -23,7 +25,7 @@ for (const [name, version] of Object.entries(required)) {
     throw new Error(`missing capability ${name}@${version}`);
   }
 }
-if (contract.contract !== "komari.rpc.v2.3") {
+if (contract.contract !== "komari.rpc.v2.4") {
   throw new Error(`unexpected contract ${contract.contract}`);
 }
 ' "$server_repo/contracts/rpc-v2.json"

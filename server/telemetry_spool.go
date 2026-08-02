@@ -32,14 +32,15 @@ type spooledFrame struct {
 }
 
 type telemetrySpool struct {
-	mu           sync.Mutex
-	path         string
-	file         *os.File
-	pending      map[uint64]spooledFrame
-	maximumSeen  uint64
-	payloadBytes int
-	ackRecords   int
-	now          func() time.Time
+	mu                  sync.Mutex
+	path                string
+	file                *os.File
+	pending             map[uint64]spooledFrame
+	maximumSeen         uint64
+	acknowledgedThrough uint64
+	payloadBytes        int
+	ackRecords          int
+	now                 func() time.Time
 }
 
 func openTelemetrySpool(path string, now func() time.Time) (*telemetrySpool, error) {
@@ -63,6 +64,7 @@ func openTelemetrySpool(path string, now func() time.Time) (*telemetrySpool, err
 		_ = os.Rename(path, quarantine)
 		spool.pending = make(map[uint64]spooledFrame)
 		spool.maximumSeen = 0
+		spool.acknowledgedThrough = 0
 		spool.payloadBytes = 0
 		if reopenErr := spool.openEmpty(); reopenErr != nil {
 			return nil, errors.Join(err, reopenErr)
@@ -152,6 +154,7 @@ func (spool *telemetrySpool) load(file *os.File) error {
 				return errors.New("telemetry spool exceeds configured bounds")
 			}
 		case spoolRecordAck:
+			spool.acknowledgedThrough = max(spool.acknowledgedThrough, sequence)
 			for pendingSequence, frame := range spool.pending {
 				if pendingSequence <= sequence {
 					spool.payloadBytes -= len(frame.Payload)
@@ -209,6 +212,13 @@ func (spool *telemetrySpool) Ack(through uint64) error {
 	}
 	spool.mu.Lock()
 	defer spool.mu.Unlock()
+	// Durable acknowledgements are cumulative. Repeated or stale ACKs are
+	// expected when a frame is replayed or a response is delayed, and must be a
+	// no-op: writing and syncing every duplicate ACK creates an I/O feedback
+	// loop under load.
+	if through <= spool.acknowledgedThrough {
+		return nil
+	}
 	if err := spool.appendRecordLocked(spoolRecordAck, through, spool.now(), nil); err != nil {
 		return err
 	}
@@ -217,6 +227,7 @@ func (spool *telemetrySpool) Ack(through uint64) error {
 	// immediately instead of replaying sequence numbers for the agent's entire
 	// previous uptime.
 	spool.maximumSeen = max(spool.maximumSeen, through)
+	spool.acknowledgedThrough = through
 	for sequence, frame := range spool.pending {
 		if sequence <= through {
 			spool.payloadBytes -= len(frame.Payload)
@@ -296,6 +307,9 @@ func (spool *telemetrySpool) compactLocked() error {
 	writeErr := error(nil)
 	if spool.maximumSeen > 0 {
 		writeErr = writeSpoolRecord(file, spoolRecordHighWater, spool.maximumSeen, spool.now(), nil)
+	}
+	if writeErr == nil && spool.acknowledgedThrough > 0 {
+		writeErr = writeSpoolRecord(file, spoolRecordAck, spool.acknowledgedThrough, spool.now(), nil)
 	}
 	for _, frame := range pending {
 		if writeErr == nil {
