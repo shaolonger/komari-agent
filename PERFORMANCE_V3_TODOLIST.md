@@ -1,6 +1,6 @@
 # Komari Agent Performance V3 Todo
 
-状态：实现与测试完成，GitHub 发布步骤待执行。
+状态：全部完成。
 
 ## A3-0 持久序列
 
@@ -30,4 +30,4 @@
 - [x] **A3-302** 长断线、满 spool、截断、ACK/NACK 与受限资源 soak
 - [x] **A3-303** Linux/Windows/Darwin/FreeBSD 交叉构建
 - [x] **A3-304** 与 Komari v1.4.2 的 v1/v2/v3 交叉协议验收
-- [ ] **A3-305** 版本、提交、推送、tag 与 GitHub Release
+- [x] **A3-305** 版本、提交、推送、tag 与 GitHub Release
